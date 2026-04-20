@@ -53,7 +53,7 @@ class LanguageConfig:
     resource_level: str
 
     lora_r: int = 32
-    num_epochs: int = 5
+    num_epochs: int = 1
     batch_size: int = 4
     grad_accumulation: int = 4
     learning_rate: float = 2e-4
