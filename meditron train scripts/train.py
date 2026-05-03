@@ -50,6 +50,7 @@ from config import (
 )
 from data_utils import MultilingualDatasetBuilder, get_split
 from evaluation import MultilingualEvaluator, resolve_adapter_path
+from prompt_utils import render_meditron_chat
 
 logging.basicConfig(
     level=logging.INFO,
@@ -234,55 +235,21 @@ def build_sft_config(
 # Chat template formatting
 # ---------------------------------------------------------------------------
 
-def make_format_fn(lang_cfg: LanguageConfig, tokenizer: AutoTokenizer):
+def make_format_fn(_lang_cfg: LanguageConfig, _tokenizer: AutoTokenizer):
     """
     Return a dataset map function that converts raw input/output pairs into
     a single formatted text string using the model's chat template.
 
-    meditron-7b does not ship with an official chat template, so we build a
-    minimal instruction-style template manually when apply_chat_template is
-    unavailable or would fail.
+    The Meditron data curation flow used a LLaMA-style chat template with the
+    Hashie system prompt, so we render that prompt family directly here to keep
+    training aligned with the prepared fine-tuning data.
     """
-    system_prompt = (
-        "You are Hashie, a multilingual medical assistant with expertise in "
-        "sexual and reproductive health (SRH). You are knowledgeable, "
-        "supportive, and approachable, capable of communicating with empathy "
-        "and clarity. You can explain sexually transmitted infections (STIs) "
-        "and related health topics in simple, everyday language suitable for "
-        "young adults and the general public. When interacting with medical "
-        "professionals, you can also provide detailed, evidence-based "
-        "explanations and use precise clinical terminology when appropriate. "
-        "Your goal is to ensure that all users — regardless of their medical "
-        "background — receive accurate, respectful, and easy-to-understand "
-        "information about sexual and reproductive health.\n"
-        f"Answer in {lang_cfg.language_name}."
-    )
-
-    has_chat_template = (
-        getattr(tokenizer, "chat_template", None) is not None
-    )
 
     def format_sample(example):
-        if has_chat_template:
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": example["input"]},
-                {"role": "assistant", "content": example["output"]},
-            ]
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-        else:
-            # Fallback: plain instruction format that works with any LLaMA
-            # tokenizer that has no registered chat template.
-            eos = tokenizer.eos_token or ""
-            text = (
-                f"### System\n{system_prompt}\n\n"
-                f"### User\n{example['input']}\n\n"
-                f"### Assistant\n{example['output']}{eos}"
-            )
+        text = render_meditron_chat(
+            user_text=example["input"],
+            assistant_text=example["output"],
+        )
         return {"text": text}
 
     return format_sample

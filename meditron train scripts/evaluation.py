@@ -12,7 +12,7 @@ Changes from the original
 * torch_dtype=                 → dtype=  (deprecation fix)
 * pad_token set to eos_token   (LLaMA tokenizers ship without a pad token)
 * _generate uses plain tokenizer encode/decode instead of processor(text=...)
-* Chat template falls back to ### instruction format when no template registered
+* Prompt rendering now follows the shared Hashie LLaMA-style template
 
 Evaluation design notes
 -----------------------
@@ -36,6 +36,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from config import TrainingConfig, SUPPORTED_LANGUAGES
 from data_utils import MultilingualDatasetBuilder, get_split
+from prompt_utils import render_meditron_chat
 
 logger = logging.getLogger(__name__)
 
@@ -211,34 +212,14 @@ class MultilingualEvaluator:
         """
         Generate a response for a single prompt.
 
-        Uses the tokenizer's chat template when one is registered, otherwise
-        falls back to the plain ### instruction format used during training.
+        Uses the same Hashie LLaMA-style prompt template that was used during
+        Meditron data curation and training.
         """
-        system_content = (
-            "You are a helpful sexual and reproductive health assistant. "
-            f"Answer in {language_name}."
+        _ = language_name  # Kept for API compatibility with existing callers.
+        text = render_meditron_chat(
+            user_text=prompt,
+            add_generation_prompt=True,
         )
-
-        has_chat_template = getattr(tokenizer, "chat_template", None) is not None
-
-        if has_chat_template:
-            messages = [
-                {"role": "system", "content": system_content},
-                {"role": "user",   "content": prompt},
-            ]
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-        else:
-            # Plain instruction format — mirrors the training fallback in
-            # make_format_fn so the model sees the same pattern at inference.
-            text = (
-                f"### System\n{system_content}\n\n"
-                f"### User\n{prompt}\n\n"
-                f"### Assistant\n"
-            )
 
         inputs = tokenizer(
             text,

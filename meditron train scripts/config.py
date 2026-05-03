@@ -35,7 +35,7 @@ from typing import Optional
 class TrainingConfig:
     """Global settings shared across all adapter runs."""
 
-    model_id: str = "google/medgemma-4b-it"
+    model_id: str = "epfl-llm/meditron-7b"
     max_seq_length: int = 1024
     seed: int = 42
 

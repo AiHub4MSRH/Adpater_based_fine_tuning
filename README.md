@@ -1,28 +1,66 @@
-# MedGemma Multilingual SRH Adapter Fine-Tuning
+# Adapter-Based Fine-Tuning for Multilingual SRH Models
 
-This repository trains, evaluates, and publishes multilingual SRH LoRA adapters
-for `google/medgemma-4b-it`.
+This repository supports two LoRA/QLoRA fine-tuning pipelines for the same
+multilingual sexual and reproductive health (SRH) dataset:
 
-The project is designed around real dataset leaves such as `aka_gha`,
-`amh_eth`, `eng_uga`, and `swa_ken`, not bare language codes alone. Each leaf
-gets its own adapter so training, evaluation, and deployment stay aligned with
-the underlying country-specific corpus.
+- `medigemma/` for `google/medgemma-4b-it`
+- `meditron train scripts/` for `epfl-llm/meditron-7b`
 
-## Overview
+Both pipelines follow the same leaf-based workflow:
 
-This codebase supports the full workflow:
+1. Mirror multilingual dataset leaves from Hugging Face to local disk
+2. Train one adapter per dataset leaf
+3. Evaluate adapters on the matching split
+4. Compare adapters against a baseline model
+5. Push adapters to Hugging Face
+6. Run inference from published adapters
 
-1. Mirror multilingual SRH data from a Hugging Face dataset repo into local
-   `DatasetDict.save_to_disk()` caches
-2. Train one LoRA adapter per dataset leaf
-3. Evaluate trained adapters on the corresponding test split
-4. Publish adapters into a single Hugging Face model repo
-5. Run inference locally from saved adapters or directly from Hub-hosted
-   adapters
+The training unit is a dataset leaf such as `eng_uga` or `swa_ken`, not just a
+base language code like `eng` or `swa`.
 
-## Supported Languages
+## Repository Layout
 
-Grouped CLI selections expand to the following dataset leaves:
+```text
+.
+├── README.md
+├── requirements.txt
+├── medigemma/
+│   ├── config.py
+│   ├── data_utils.py
+│   ├── prepare_data.py
+│   ├── train.py
+│   ├── evaluation.py
+│   ├── compare_models.py
+│   ├── push_adapters_to_hub.py
+│   └── run_inference_from_hub.py
+└── meditron train scripts/
+    ├── config.py
+    ├── data_utils.py
+    ├── prepare_data.py
+    ├── train.py
+    ├── evaluation.py
+    ├── compare_models.py
+    ├── push_adapters_to_hub.py
+    └── run_inference_from_hub.py
+```
+
+## Model Families
+
+| Pipeline | Base model | Model type | Folder |
+| --- | --- | --- | --- |
+| MedGemma | `google/medgemma-4b-it` | image-text-to-text | `medigemma/` |
+| Meditron | `epfl-llm/meditron-7b` | text-only causal LM | `meditron train scripts/` |
+
+Use separate adapter output directories and separate Hub repos for each model
+family. Adapters trained for one base model are not interchangeable with the
+other.
+
+Note: the Meditron folder name contains spaces, so quote that path in shell
+commands.
+
+## Supported Dataset Selections
+
+Grouped CLI selections expand to these dataset leaves:
 
 - `aka` -> `aka_gha`
 - `amh` -> `amh_eth`
@@ -34,14 +72,13 @@ You can also pass explicit leaves such as `eng_uga` or `swa_ken`.
 
 ## Dataset Assumptions
 
-The dataset is expected to expose:
+The dataset loader expects:
 
-- `train`, `dev`, `test` splits
+- `train`, `dev`, and `test` splits
 - `input` and `output` columns
-- shard files such as `train-*`, `dev-*`, `test-*`
+- shard files such as `train-*`, `dev-*`, and `test-*`
 
-The loader supports both local and Hub layouts, including case variations such
-as:
+The loader accepts both local and Hub layouts, including case variants such as:
 
 ```text
 aka/aka_gha/train-*
@@ -49,50 +86,28 @@ Aka/Aka_Gha/train-*
 aka_gha/train-*
 ```
 
-## Project Structure
+## Environment Setup
 
-```text
-.
-├── config.py
-├── data_utils.py
-├── prepare_data.py
-├── train.py
-├── evaluation.py
-├── compare_models.py
-├── push_adapters_to_hub.py
-├── run_inference_from_hub.py
-├── requirements.txt
-└── README.md
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export HF_TOKEN=hf_your_token_here
 ```
 
-What each file does:
+## Script Map
 
-- `config.py`
-  Registry of supported dataset leaves, grouped language aliases, and
-  per-language training settings.
-- `data_utils.py`
-  Shared dataset loader for Hub shards, local shard trees, and local
-  `save_to_disk()` mirrors. Also contains low-resource augmentation logic.
-- `prepare_data.py`
-  Mirrors selected dataset leaves from Hugging Face into local `./data/<leaf>/`
-  caches.
-- `train.py`
-  Main training entry point. Trains one adapter per leaf and can also run
-  evaluation with `--eval_only`.
-- `evaluation.py`
-  Evaluation engine used by `train.py` for EM, token F1, ROUGE-L, and invalid
-  rate reporting.
-- `compare_models.py`
-  Compares a baseline MedGemma checkpoint against each saved adapter on an
-  evaluation split and writes both a row-level CSV and JSON reports.
-- `push_adapters_to_hub.py`
-  Publishes local adapters into one Hugging Face model repo.
-- `run_inference_from_hub.py`
-  Downloads one published adapter from Hugging Face and runs a sample prompt.
+| Task | MedGemma | Meditron |
+| --- | --- | --- |
+| Mirror data | `python3 medigemma/prepare_data.py` | `python3 'meditron train scripts/prepare_data.py'` |
+| Train or eval | `python3 medigemma/train.py` | `python3 'meditron train scripts/train.py'` |
+| Compare baseline vs adapter | `python3 medigemma/compare_models.py` | `python3 'meditron train scripts/compare_models.py'` |
+| Push adapters to Hub | `python3 medigemma/push_adapters_to_hub.py` | `python3 'meditron train scripts/push_adapters_to_hub.py'` |
+| Run Hub inference | `python3 medigemma/run_inference_from_hub.py` | `python3 'meditron train scripts/run_inference_from_hub.py'` |
 
-## Runtime Artifacts
+## Recommended Output Layout
 
-After running the workflow, you will typically have:
+To avoid mixing adapters from different base models, keep outputs separate:
 
 ```text
 data/
@@ -107,218 +122,183 @@ data/
 └── swa_uga/
 
 adapters/
-├── adapter_aka_gha/
-├── adapter_amh_eth/
-├── adapter_eng_eth/
-├── ...
-└── eval_report.json
+├── medigemma/
+└── meditron/
 ```
 
-Note:
+## Typical Workflow
 
-- PEFT may save named adapters in nested directories such as
-  `adapter_amh_eth/amh_eth/adapter_config.json`
-- The publish and inference scripts in this repo handle that layout
-  automatically
+The commands below use the same dataset cache for both models, but separate
+adapter output roots.
 
-## Environment Setup
+### 1. Mirror the Dataset Locally
 
-Create or activate your environment, install dependencies, and export your
-token:
+MedGemma:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-export HF_TOKEN=hf_your_token_here
-```
-
-If you are using a managed VM with an existing environment, just activate it
-and set `HF_TOKEN`.
-
-## End-to-End Workflow
-
-### 1. Mirror Dataset Locally
-
-Mirror all supported languages:
-
-```bash
-python3 prepare_data.py \
+python3 medigemma/prepare_data.py \
   --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET \
   --languages aka amh eng lug swa \
   --output_root ./data
 ```
 
-Mirror only selected leaves or groups:
+Meditron:
 
 ```bash
-python3 prepare_data.py \
+python3 'meditron train scripts/prepare_data.py' \
   --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET \
-  --languages amh eng \
+  --languages aka amh eng lug swa \
   --output_root ./data
 ```
 
 ### 2. Train One Adapter as a Smoke Test
 
-Example:
+MedGemma:
 
 ```bash
-python3 train.py \
+python3 medigemma/train.py \
   --data_root ./data \
   --languages amh \
-  --output_root ./adapters \
+  --output_root ./adapters/medigemma \
   --max_eval_samples 50
 ```
 
-This:
-
-- loads `amh_eth`
-- applies low-resource augmentation if configured
-- trains the adapter
-- evaluates it
-- writes results to `./adapters/eval_report.json`
-
-### 3. Safest Production Workflow: Train One Leaf at a Time
-
-This is the recommended approach on storage-constrained VMs.
-
-Recommended order:
-
-1. `eng_eth`
-2. `eng_gha`
-3. `eng_ken`
-4. `eng_uga`
-5. `aka_gha`
-6. `amh_eth`
-7. `lug_uga`
-8. `swa_ken`
-9. `swa_uga`
-
-Example pattern:
+Meditron:
 
 ```bash
-python3 train.py \
+python3 'meditron train scripts/train.py' \
   --data_root ./data \
-  --languages eng_eth \
-  --output_root ./adapters \
+  --languages amh \
+  --output_root ./adapters/meditron \
+  --max_eval_samples 50
+```
+
+### 3. Train a Single Leaf for Production Runs
+
+MedGemma:
+
+```bash
+python3 medigemma/train.py \
+  --data_root ./data \
+  --languages eng_uga \
+  --output_root ./adapters/medigemma \
   --max_eval_samples 100
 ```
 
-After each run, remove checkpoint directories to control disk usage:
+Meditron:
+
+```bash
+python3 'meditron train scripts/train.py' \
+  --data_root ./data \
+  --languages eng_uga \
+  --output_root ./adapters/meditron \
+  --max_eval_samples 100
+```
+
+If disk space is limited, train one leaf at a time and remove stale
+`checkpoint-*` directories after successful runs:
 
 ```bash
 find ./adapters -type d -name "checkpoint-*" -prune -exec rm -rf {} +
 ```
 
-Useful disk checks:
+### 4. Evaluate Existing Adapters
+
+MedGemma:
 
 ```bash
-df -h
-du -sh ./adapters
-du -sh ./adapters/*
-```
-
-### 4. Evaluate All Trained Adapters
-
-After all leaf-by-leaf training is complete:
-
-```bash
-python3 train.py \
+python3 medigemma/train.py \
   --eval_only \
   --data_root ./data \
   --languages aka amh eng lug swa \
-  --output_root ./adapters \
+  --output_root ./adapters/medigemma \
   --max_eval_samples 200
 ```
 
-This updates:
-
-- `./adapters/eval_report.json`
-
-## Training Commands
-
-### Train From Local Mirrors
-
-All languages:
+Meditron:
 
 ```bash
-python3 train.py \
+python3 'meditron train scripts/train.py' \
+  --eval_only \
   --data_root ./data \
   --languages aka amh eng lug swa \
-  --output_root ./adapters
+  --output_root ./adapters/meditron \
+  --max_eval_samples 200
 ```
 
-Specific leaves:
+### 5. Train Directly From a Hugging Face Dataset Repo
+
+MedGemma:
 
 ```bash
-python3 train.py \
+python3 medigemma/train.py \
+  --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET \
+  --languages aka amh eng lug swa \
+  --output_root ./adapters/medigemma
+```
+
+Meditron:
+
+```bash
+python3 'meditron train scripts/train.py' \
+  --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET \
+  --languages aka amh eng lug swa \
+  --output_root ./adapters/meditron
+```
+
+## Comparing Baselines and Adapters
+
+MedGemma:
+
+```bash
+python3 medigemma/compare_models.py \
   --data_root ./data \
   --languages eng_uga swa_ken \
-  --output_root ./adapters
+  --output_root ./adapters/medigemma \
+  --baseline_model /path/to/your/original-finetuned-medgemma \
+  --max_eval_samples 100 \
+  --load_in_4bit
 ```
 
-### Train Directly From a Hugging Face Dataset Repo
+Meditron:
 
 ```bash
-python3 train.py \
-  --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET \
-  --languages aka amh eng lug swa \
-  --output_root ./adapters
-```
-
-### Evaluation Only
-
-From local data:
-
-```bash
-python3 train.py \
-  --eval_only \
+python3 'meditron train scripts/compare_models.py' \
   --data_root ./data \
-  --languages aka amh eng lug swa \
-  --output_root ./adapters \
-  --max_eval_samples 200
+  --languages eng_uga swa_ken \
+  --output_root ./adapters/meditron \
+  --baseline_model /path/to/your/original-finetuned-meditron \
+  --max_eval_samples 100 \
+  --load_in_4bit
 ```
 
-From Hub data:
+These commands write:
+
+- `adapter_baseline_comparison.csv`
+- `baseline_eval_report.json`
+- `adapter_comparison_report.json`
+
+## Pushing Adapters to Hugging Face
+
+MedGemma:
 
 ```bash
-python3 train.py \
-  --eval_only \
-  --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET \
-  --languages aka amh eng lug swa \
-  --output_root ./adapters \
-  --max_eval_samples 200
-```
-
-## Push Adapters to Hugging Face
-
-### Push All Local Adapters
-
-```bash
-python3 push_adapters_to_hub.py \
-  --repo_id your-org/hashie-srh-adapters \
-  --output_root ./adapters \
+python3 medigemma/push_adapters_to_hub.py \
+  --repo_id your-org/hashie-srh-medgemma-adapters \
+  --output_root ./adapters/medigemma \
   --private
 ```
 
-### Push Only Selected Languages
+Meditron:
 
 ```bash
-python3 push_adapters_to_hub.py \
-  --repo_id your-org/hashie-srh-adapters \
-  --output_root ./adapters \
-  --languages aka amh eng lug swa \
+python3 'meditron train scripts/push_adapters_to_hub.py' \
+  --repo_id your-org/hashie-srh-meditron-adapters \
+  --output_root ./adapters/meditron \
   --private
 ```
 
-This uploads:
-
-- `adapters/<dataset_id>/...`
-- `adapters/manifest.json`
-- `README.md`
-- `reports/eval_report.json` if present
-
-Expected Hub layout:
+Published repos use a layout like:
 
 ```text
 README.md
@@ -337,97 +317,22 @@ reports/
 └── eval_report.json
 ```
 
-## Inference
+## Running Hub Inference
 
-### Baseline vs Adapter Comparison
-
-Run a baseline checkpoint against the same evaluation split as each adapter and
-save both row-level generations and summary reports:
+MedGemma:
 
 ```bash
-python3 compare_models.py \
-  --data_root ./data \
-  --languages eng_uga swa_ken \
-  --output_root ./adapters \
-  --baseline_model /path/to/your/original-finetuned-medgemma \
-  --max_eval_samples 100 \
-  --load_in_4bit
+python3 medigemma/run_inference_from_hub.py \
+  --adapter_repo your-org/hashie-srh-medgemma-adapters \
+  --adapter_name amh_eth \
+  --prompt "What are common symptoms of an STI?"
 ```
 
-This writes:
-
-- `./adapters/adapter_baseline_comparison.csv`
-- `./adapters/baseline_eval_report.json`
-- `./adapters/adapter_comparison_report.json`
-
-The CSV includes the dataset leaf, original question, reference answer,
-baseline model prediction, and adapter prediction so you can inspect exactly
-where the adapters helped or regressed.
-
-### Local Inference From a Saved Adapter
-
-There is no dedicated CLI script for local inference in this repo, but you can
-run it with a short Python snippet using the helper in `train.py`.
-
-Example:
+Meditron:
 
 ```bash
-python3 - <<'PY'
-from pathlib import Path
-from train import load_adapter_for_inference
-from config import TrainingConfig
-import torch
-
-cfg = TrainingConfig()
-model, processor = load_adapter_for_inference(
-    language="amh_eth",
-    cfg=cfg,
-    output_root=Path("adapters"),
-)
-
-messages = [
-    {
-        "role": "system",
-        "content": (
-            "You are Hashie, a multilingual medical assistant with expertise in "
-            "sexual and reproductive health. Answer in Amharic."
-        ),
-    },
-    {"role": "user", "content": "What are common symptoms of an STI?"},
-]
-
-text = processor.tokenizer.apply_chat_template(
-    messages,
-    tokenize=False,
-    add_generation_prompt=True,
-)
-inputs = processor(text=text, return_tensors="pt")
-if torch.cuda.is_available():
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
-with torch.no_grad():
-    output_ids = model.generate(
-        **inputs,
-        max_new_tokens=256,
-        do_sample=False,
-        temperature=None,
-        top_p=None,
-    )
-
-prompt_length = inputs["input_ids"].shape[1]
-new_tokens = output_ids[0][prompt_length:]
-response = processor.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-print(response)
-PY
-```
-
-### Hub Inference
-
-Run inference against one published adapter:
-
-```bash
-python3 run_inference_from_hub.py \
-  --adapter_repo your-org/hashie-srh-adapters \
+python3 'meditron train scripts/run_inference_from_hub.py' \
+  --adapter_repo your-org/hashie-srh-meditron-adapters \
   --adapter_name amh_eth \
   --prompt "What are common symptoms of an STI?"
 ```
@@ -435,92 +340,57 @@ python3 run_inference_from_hub.py \
 Optional low-memory loading:
 
 ```bash
-python3 run_inference_from_hub.py \
-  --adapter_repo your-org/hashie-srh-adapters \
+python3 medigemma/run_inference_from_hub.py \
+  --adapter_repo your-org/hashie-srh-medgemma-adapters \
   --adapter_name swa_ken \
   --prompt "Shida ya Ukimwi ni nini?" \
   --load_in_4bit
 ```
 
-You can also override the base model:
-
 ```bash
-python3 run_inference_from_hub.py \
-  --adapter_repo your-org/hashie-srh-adapters \
-  --adapter_name eng_uga \
-  --base_model google/medgemma-4b-it \
-  --prompt "When should someone seek urgent care during pregnancy?"
+python3 'meditron train scripts/run_inference_from_hub.py' \
+  --adapter_repo your-org/hashie-srh-meditron-adapters \
+  --adapter_name swa_ken \
+  --prompt "Shida ya Ukimwi ni nini?" \
+  --load_in_4bit
 ```
 
-## Practical Operating Notes
+## Practical Notes
 
-- Train one leaf at a time if disk space is limited
-- Remove `checkpoint-*` folders after successful runs if you do not need resume
-  training
-- `./adapters/eval_report.json` is overwritten when evaluation runs again
-- Hub publish and Hub inference now support both flat and nested PEFT adapter
-  layouts
-- Exact Match is usually very strict for generative SRH answers; use token F1
-  and ROUGE-L alongside manual spot checks
+- Train one dataset leaf at a time on storage-constrained machines.
+- Keep MedGemma and Meditron adapters in different output roots.
+- Keep separate Hugging Face repos for each base model family.
+- The publish and inference scripts support both flat and nested PEFT adapter
+  layouts.
+- Exact Match is strict for generative SRH answers, so use token F1 and
+  ROUGE-L alongside manual review.
 
-## Common Commands Cheat Sheet
+## Quick Commands
 
 Mirror data:
 
 ```bash
-python3 prepare_data.py \
-  --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET \
-  --languages aka amh eng lug swa \
-  --output_root ./data
+python3 medigemma/prepare_data.py --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET --languages aka amh eng lug swa --output_root ./data
+python3 'meditron train scripts/prepare_data.py' --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET --languages aka amh eng lug swa --output_root ./data
 ```
 
-Train one language:
+Train one leaf:
 
 ```bash
-python3 train.py \
-  --data_root ./data \
-  --languages amh_eth \
-  --output_root ./adapters \
-  --max_eval_samples 100
+python3 medigemma/train.py --data_root ./data --languages amh_eth --output_root ./adapters/medigemma --max_eval_samples 100
+python3 'meditron train scripts/train.py' --data_root ./data --languages amh_eth --output_root ./adapters/meditron --max_eval_samples 100
 ```
 
 Evaluate all:
 
 ```bash
-python3 train.py \
-  --eval_only \
-  --data_root ./data \
-  --languages aka amh eng lug swa \
-  --output_root ./adapters \
-  --max_eval_samples 200
+python3 medigemma/train.py --eval_only --data_root ./data --languages aka amh eng lug swa --output_root ./adapters/medigemma --max_eval_samples 200
+python3 'meditron train scripts/train.py' --eval_only --data_root ./data --languages aka amh eng lug swa --output_root ./adapters/meditron --max_eval_samples 200
 ```
 
-Push all adapters:
+Push adapters:
 
 ```bash
-python3 push_adapters_to_hub.py \
-  --repo_id your-org/hashie-srh-adapters \
-  --output_root ./adapters \
-  --private
-```
-
-Run Hub inference:
-
-```bash
-python3 run_inference_from_hub.py \
-  --adapter_repo your-org/hashie-srh-adapters \
-  --adapter_name amh_eth \
-  --prompt "What are common symptoms of an STI?"
-```
-
-Compare a baseline model versus local adapters:
-
-```bash
-python3 compare_models.py \
-  --data_root ./data \
-  --languages eng \
-  --output_root ./adapters \
-  --baseline_model /path/to/your/original-finetuned-medgemma \
-  --max_eval_samples 100 \
-  --load_in_4bit
+python3 medigemma/push_adapters_to_hub.py --repo_id your-org/hashie-srh-medgemma-adapters --output_root ./adapters/medigemma --private
+python3 'meditron train scripts/push_adapters_to_hub.py' --repo_id your-org/hashie-srh-meditron-adapters --output_root ./adapters/meditron --private
 ```

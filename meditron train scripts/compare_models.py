@@ -12,7 +12,7 @@ Changes from original
 * pad_token set to eos_token  (LLaMA ships without one)
 * processor(text=...) calls   → tokenizer(...) calls
 * processor.tokenizer.*       → tokenizer.* throughout
-* Chat template falls back to ### instruction format if none registered
+* Prompt rendering now follows the shared Hashie LLaMA-style template
 
 This script runs the same evaluation prompts through:
 1. a baseline meditron-7b checkpoint
@@ -41,6 +41,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from config import SUPPORTED_LANGUAGES, TrainingConfig, expand_language_selection
 from data_utils import MultilingualDatasetBuilder, get_split
 from evaluation import resolve_adapter_path
+from prompt_utils import render_meditron_chat
 
 logging.basicConfig(
     level=logging.INFO,
@@ -162,30 +163,11 @@ def generate_response(
     max_new_tokens: int,
 ) -> str:
     """Generate one response using deterministic decoding."""
-    system_content = (
-        "You are a helpful sexual and reproductive health assistant. "
-        f"Answer in {language_name}."
+    _ = language_name  # Kept for API compatibility with existing callers.
+    text = render_meditron_chat(
+        user_text=prompt,
+        add_generation_prompt=True,
     )
-
-    has_chat_template = getattr(tokenizer, "chat_template", None) is not None
-
-    if has_chat_template:
-        messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user",   "content": prompt},
-        ]
-        text = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-    else:
-        # Fallback mirrors the training prompt format in train.py
-        text = (
-            f"### System\n{system_content}\n\n"
-            f"### User\n{prompt}\n\n"
-            f"### Assistant\n"
-        )
 
     inputs = tokenizer(text, return_tensors="pt", truncation=True)
     if torch.cuda.is_available():
