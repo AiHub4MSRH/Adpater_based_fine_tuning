@@ -70,6 +70,18 @@ Grouped CLI selections expand to these dataset leaves:
 
 You can also pass explicit leaves such as `eng_uga` or `swa_ken`.
 
+Current full leaf set in this repo:
+
+- `aka_gha`
+- `amh_eth`
+- `eng_eth`
+- `eng_gha`
+- `eng_ken`
+- `eng_uga`
+- `lug_uga`
+- `swa_ken`
+- `swa_uga`
+
 ## Dataset Assumptions
 
 The dataset loader expects:
@@ -204,6 +216,18 @@ find ./adapters -type d -name "checkpoint-*" -prune -exec rm -rf {} +
 
 ### 4. Evaluate Existing Adapters
 
+If you want to evaluate the exact full leaf set explicitly instead of using
+group aliases, use:
+
+```bash
+python3 'meditron train scripts/train.py' \
+  --eval_only \
+  --data_root ./data \
+  --languages eng_uga eng_eth eng_gha eng_ken aka_gha amh_eth lug_uga swa_ken swa_uga \
+  --output_root ./adapters/meditron \
+  --max_eval_samples 100000
+```
+
 MedGemma:
 
 ```bash
@@ -279,6 +303,16 @@ These commands write:
 - `adapter_comparison_report.json`
 
 ## Pushing Adapters to Hugging Face
+
+If you want to push the exact full Meditron leaf set explicitly, use:
+
+```bash
+python3 'meditron train scripts/push_adapters_to_hub.py' \
+  --repo_id your-org/hashie-srh-meditron-adapters \
+  --output_root ./adapters/meditron \
+  --languages eng_uga eng_eth eng_gha eng_ken aka_gha amh_eth lug_uga swa_ken swa_uga \
+  --private
+```
 
 MedGemma:
 
@@ -388,9 +422,21 @@ python3 medigemma/train.py --eval_only --data_root ./data --languages aka amh en
 python3 'meditron train scripts/train.py' --eval_only --data_root ./data --languages aka amh eng lug swa --output_root ./adapters/meditron --max_eval_samples 200
 ```
 
+Evaluate the explicit nine-leaf set for Meditron:
+
+```bash
+python3 'meditron train scripts/train.py' --eval_only --data_root ./data --languages eng_uga eng_eth eng_gha eng_ken aka_gha amh_eth lug_uga swa_ken swa_uga --output_root ./adapters/meditron --max_eval_samples 100000
+```
+
 Push adapters:
 
 ```bash
 python3 medigemma/push_adapters_to_hub.py --repo_id your-org/hashie-srh-medgemma-adapters --output_root ./adapters/medigemma --private
 python3 'meditron train scripts/push_adapters_to_hub.py' --repo_id your-org/hashie-srh-meditron-adapters --output_root ./adapters/meditron --private
+```
+
+Push the explicit nine-leaf Meditron set:
+
+```bash
+python3 'meditron train scripts/push_adapters_to_hub.py' --repo_id your-org/hashie-srh-meditron-adapters --output_root ./adapters/meditron --languages eng_uga eng_eth eng_gha eng_ken aka_gha amh_eth lug_uga swa_ken swa_uga --private
 ```
