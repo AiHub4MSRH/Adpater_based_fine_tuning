@@ -19,3 +19,4 @@ rouge-score>=0.1.2
 Pillow>=10.0.0
 numpy>=1.26.0
 tqdm>=4.66.0
+vllm==0.12.0

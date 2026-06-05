@@ -49,7 +49,7 @@ from config import (
     expand_language_selection,
 )
 from data_utils import MultilingualDatasetBuilder, get_split
-from evaluation import MultilingualEvaluator, resolve_adapter_path
+from evaluation import MultilingualEvaluator, download_adapters, resolve_adapter_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -414,7 +414,7 @@ def parse_args():
     parser.add_argument(
         "--dataset_repo",
         type=str,
-        default=None,
+        default="AiHub4MSRH-Hash/RAW_HASH_DATASET",
         help="Hugging Face dataset repo id containing the multilingual SRH shards.",
     )
     parser.add_argument(
@@ -445,6 +445,16 @@ def parse_args():
         "--eval_only",
         action="store_true",
         help="Skip training and run evaluation on saved adapters only.",
+    )
+    parser.add_argument(
+        "--adapter_repo",
+        type=str,
+        default=None,
+        help=(
+            "HF repo id to download pre-trained adapters from before evaluation, "
+            "e.g. 'AiHub4MSRH-Hash/medgemma-srh-adapters-v1'. "
+            "Skipped if not provided."
+        ),
     )
     parser.add_argument(
         "--hf_token",
@@ -513,6 +523,16 @@ def main():
                 dataset=dataset,
                 output_root=output_root,
             )
+
+    if args.adapter_repo:
+        logger.info("Downloading adapters from %s …", args.adapter_repo)
+        download_adapters(
+            adapter_repo=args.adapter_repo,
+            lang_codes=selected_languages,
+            adapter_root=output_root,
+            cache_dir=args.cache_dir,
+            hf_token=hf_token,
+        )
 
     evaluator = MultilingualEvaluator(cfg, output_root, dataset_builder=builder)
     results = evaluator.evaluate_all(
