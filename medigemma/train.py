@@ -449,11 +449,10 @@ def parse_args():
     parser.add_argument(
         "--adapter_repo",
         type=str,
-        default=None,
+        default="AiHub4MSRH-Hash/hashie-srh-medgemma-adapters",
         help=(
-            "HF repo id to download pre-trained adapters from before evaluation, "
-            "e.g. 'AiHub4MSRH-Hash/medgemma-srh-adapters-v1'. "
-            "Skipped if not provided."
+            "HF repo id to download pre-trained adapters from before evaluation. "
+            "Set to empty string to skip."
         ),
     )
     parser.add_argument(
