@@ -35,8 +35,9 @@ from typing import Optional
 class TrainingConfig:
     """Global settings shared across all adapter runs."""
 
-    model_id: str = "google/medgemma-4b-it"
-    max_seq_length: int = 1024
+    model_id: str = "google/medgemma-1.5-4b-it"
+    max_seq_length: int = 1536
+    max_length: int = 512
     seed: int = 42
 
 
@@ -52,17 +53,19 @@ class LanguageConfig:
     script: str
     resource_level: str
 
-    lora_r: int = 32
-    num_epochs: int = 1
+    lora_r: int = 64
+    num_epochs: int = 3
     batch_size: int = 4
-    grad_accumulation: int = 4
-    learning_rate: float = 2e-4
+    grad_accumulation: int = 8
+    learning_rate: float = 1e-5
     early_stopping_patience: Optional[int] = 3
     transfer_from: Optional[str] = None
 
     @property
     def display_name(self) -> str:
-        return f"{self.language_name} ({self.country_name})"
+        if self.country_name:
+            return f"{self.language_name} ({self.country_name})"
+        return self.language_name
 
     @property
     def hub_subdir(self) -> str:
@@ -100,141 +103,68 @@ class LanguageConfig:
 
 
 SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
-    # ── Akan / Ghana ────────────────────────────────────────────────────────
-    "aka_gha": LanguageConfig(
-        dataset_id="aka_gha",
+    # ── Akan (all countries combined) ───────────────────────────────────────
+    "aka": LanguageConfig(
+        dataset_id="aka",
         language_code="aka",
         language_name="Akan",
-        country_code="gha",
-        country_name="Ghana",
+        country_code="",
+        country_name="",
         script="latin",
         resource_level="low",
-        lora_r=16,
-        num_epochs=10,
-        learning_rate=1e-4,
-        early_stopping_patience=5,
-        transfer_from="eng_gha",
+        transfer_from="eng",
     ),
-    # ── Amharic / Ethiopia ──────────────────────────────────────────────────
-    "amh_eth": LanguageConfig(
-        dataset_id="amh_eth",
+    # ── Amharic (all countries combined) ────────────────────────────────────
+    "amh": LanguageConfig(
+        dataset_id="amh",
         language_code="amh",
         language_name="Amharic",
-        country_code="eth",
-        country_name="Ethiopia",
+        country_code="",
+        country_name="",
         script="geez",
         resource_level="low",
-        lora_r=16,
-        num_epochs=10,
-        learning_rate=1e-4,
-        early_stopping_patience=5,
-        transfer_from="eng_eth",
+        transfer_from="eng",
     ),
-    # ── English variants ────────────────────────────────────────────────────
-    "eng_eth": LanguageConfig(
-        dataset_id="eng_eth",
+    # ── English (all countries combined) ────────────────────────────────────
+    "eng": LanguageConfig(
+        dataset_id="eng",
         language_code="eng",
         language_name="English",
-        country_code="eth",
-        country_name="Ethiopia",
+        country_code="",
+        country_name="",
         script="latin",
         resource_level="high",
-        lora_r=32,
-        num_epochs=5,
-        learning_rate=2e-4,
-        early_stopping_patience=3,
     ),
-    "eng_gha": LanguageConfig(
-        dataset_id="eng_gha",
-        language_code="eng",
-        language_name="English",
-        country_code="gha",
-        country_name="Ghana",
-        script="latin",
-        resource_level="high",
-        lora_r=32,
-        num_epochs=5,
-        learning_rate=2e-4,
-        early_stopping_patience=3,
-    ),
-    "eng_ken": LanguageConfig(
-        dataset_id="eng_ken",
-        language_code="eng",
-        language_name="English",
-        country_code="ken",
-        country_name="Kenya",
-        script="latin",
-        resource_level="high",
-        lora_r=32,
-        num_epochs=5,
-        learning_rate=2e-4,
-        early_stopping_patience=3,
-    ),
-    "eng_uga": LanguageConfig(
-        dataset_id="eng_uga",
-        language_code="eng",
-        language_name="English",
-        country_code="uga",
-        country_name="Uganda",
-        script="latin",
-        resource_level="high",
-        lora_r=32,
-        num_epochs=5,
-        learning_rate=2e-4,
-        early_stopping_patience=3,
-    ),
-    # ── Luganda / Uganda ────────────────────────────────────────────────────
-    "lug_uga": LanguageConfig(
-        dataset_id="lug_uga",
+    # ── Luganda (all countries combined) ────────────────────────────────────
+    "lug": LanguageConfig(
+        dataset_id="lug",
         language_code="lug",
         language_name="Luganda",
-        country_code="uga",
-        country_name="Uganda",
+        country_code="",
+        country_name="",
         script="latin",
         resource_level="low",
-        lora_r=16,
-        num_epochs=10,
-        learning_rate=1e-4,
-        early_stopping_patience=5,
-        transfer_from="eng_uga",
+        transfer_from="eng",
     ),
-    # ── Swahili variants ────────────────────────────────────────────────────
-    "swa_ken": LanguageConfig(
-        dataset_id="swa_ken",
+    # ── Swahili (all countries combined) ────────────────────────────────────
+    "swa": LanguageConfig(
+        dataset_id="swa",
         language_code="swa",
         language_name="Swahili",
-        country_code="ken",
-        country_name="Kenya",
+        country_code="",
+        country_name="",
         script="latin",
         resource_level="medium",
-        lora_r=32,
-        num_epochs=6,
-        learning_rate=2e-4,
-        early_stopping_patience=3,
-    ),
-    "swa_uga": LanguageConfig(
-        dataset_id="swa_uga",
-        language_code="swa",
-        language_name="Swahili",
-        country_code="uga",
-        country_name="Uganda",
-        script="latin",
-        resource_level="medium",
-        lora_r=32,
-        num_epochs=6,
-        learning_rate=2e-4,
-        early_stopping_patience=3,
-        transfer_from="swa_ken",
     ),
 }
 
 
 LANGUAGE_GROUPS: dict[str, list[str]] = {
-    "aka": ["aka_gha"],
-    "amh": ["amh_eth"],
-    "eng": ["eng_eth", "eng_gha", "eng_ken", "eng_uga"],
-    "lug": ["lug_uga"],
-    "swa": ["swa_ken", "swa_uga"],
+    "aka": ["aka"],
+    "amh": ["amh"],
+    "eng": ["eng"],
+    "lug": ["lug"],
+    "swa": ["swa"],
 }
 
 

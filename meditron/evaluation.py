@@ -50,7 +50,7 @@ import torch
 import torch.nn.functional as F
 from rouge_score import rouge_scorer
 from transformers import (
-    AutoProcessor,
+    AutoTokenizer,
     XLMRobertaModel,
     XLMRobertaTokenizer,
 )
@@ -58,6 +58,7 @@ from vllm import LLM, SamplingParams
 
 from config import TrainingConfig, SUPPORTED_LANGUAGES
 from data_utils import MultilingualDatasetBuilder, get_split
+from prompt_utils import render_meditron_chat
 
 logger = logging.getLogger(__name__)
 
@@ -197,10 +198,9 @@ def _merge_adapter_to_disk(base_model_id: str, adapter_path: Path) -> Path:
     logger.info("Saving merged model to %s …", tmp)
     merged.save_pretrained(tmp)
 
-    # Copy the full processor (tokenizer + image processor + preprocessor_config)
-    # so vLLM can load it from the temp dir without hitting the Hub.
-    processor = AutoProcessor.from_pretrained(base_model_id, trust_remote_code=True)
-    processor.save_pretrained(tmp)
+    # Copy tokenizer so vLLM can load it from the temp dir without hitting the Hub.
+    tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
+    tokenizer.save_pretrained(tmp)
 
     # Free the CPU copy immediately — vLLM will reload from disk onto GPU
     del merged, peft_model, base
@@ -554,6 +554,7 @@ class MultilingualEvaluator:
         dataset_builder: Optional[MultilingualDatasetBuilder] = None,
         tensor_parallel: int = 1,
         gpu_memory_utilization: float = 0.5,
+        base_model_only: bool = False,
     ):
         self.cfg                    = cfg
         self.adapter_root           = adapter_root
@@ -561,11 +562,13 @@ class MultilingualEvaluator:
         self.dataset_builder        = dataset_builder
         self.tensor_parallel        = tensor_parallel
         self.gpu_memory_utilization = gpu_memory_utilization
-        self._processor             = AutoProcessor.from_pretrained(cfg.model_id)
+        self.base_model_only        = base_model_only
+        self._tokenizer             = AutoTokenizer.from_pretrained(cfg.model_id)
+        self._base_llm: Optional[LLM] = None
 
     def _load_merged_llm(self, merged_model_path: Path) -> LLM:
-        """Load a merged model from disk into vLLM."""
-        logger.info("Loading merged model via vLLM: %s …", merged_model_path)
+        """Load a merged (or base) model from disk into vLLM."""
+        logger.info("Loading model via vLLM: %s …", merged_model_path)
         return LLM(
             model=str(merged_model_path),
             tensor_parallel_size=self.tensor_parallel,
@@ -573,6 +576,24 @@ class MultilingualEvaluator:
             dtype="bfloat16",
             trust_remote_code=True,
         )
+
+    def _ensure_base_llm(self) -> LLM:
+        """Lazily load the base model once for base_model_only mode."""
+        if self._base_llm is None:
+            logger.info("Loading base model via vLLM: %s …", self.cfg.model_id)
+            self._base_llm = LLM(
+                model=self.cfg.model_id,
+                tensor_parallel_size=self.tensor_parallel,
+                gpu_memory_utilization=self.gpu_memory_utilization,
+                dtype="bfloat16",
+                trust_remote_code=True,
+            )
+        return self._base_llm
+
+    def _release_base_llm(self) -> None:
+        if self._base_llm is not None:
+            self._release_llm(self._base_llm)
+            self._base_llm = None
 
     @staticmethod
     def _release_llm(llm: LLM) -> None:
@@ -587,22 +608,8 @@ class MultilingualEvaluator:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def _build_prompt(self, prompt: str, language_name: str) -> str:
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful sexual and reproductive health assistant. "
-                    f"Answer in {language_name}."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ]
-        return self._processor.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+    def _build_prompt(self, prompt: str) -> str:
+        return render_meditron_chat(user_text=prompt, add_generation_prompt=True)
 
     def _generate_and_score(
         self,
@@ -618,7 +625,7 @@ class MultilingualEvaluator:
         evaluate_all can run the judge separately in phase 2.
         """
         adapter_path = resolve_adapter_path(self.adapter_root, lang_code)
-        if adapter_path is None:
+        if adapter_path is None and not self.base_model_only:
             logger.warning("Adapter not found for %s; skipping evaluation.", lang_code)
             return {"language": lang_code, "error": "adapter_not_found"}
 
@@ -643,12 +650,17 @@ class MultilingualEvaluator:
         n       = min(len(test_ds), max_eval_samples)
         test_ds = test_ds.shuffle(seed=42).select(range(n))
 
-        prompts    = [self._build_prompt(ex["input"], language_name) for ex in test_ds]
+        prompts    = [self._build_prompt(ex["input"]) for ex in test_ds]
         references = [ex["output"] for ex in test_ds]
 
-        # ── Merge adapter into base model, load into vLLM ─────────
-        merged_path = _merge_adapter_to_disk(self.cfg.model_id, adapter_path)
-        llm = self._load_merged_llm(merged_path)
+        # ── Load model (base-only or adapter-merged) ──────────────
+        if self.base_model_only:
+            logger.info("[%s] Running base model (no adapter) …", lang_code)
+            llm         = self._ensure_base_llm()
+            merged_path = None
+        else:
+            merged_path = _merge_adapter_to_disk(self.cfg.model_id, adapter_path)
+            llm         = self._load_merged_llm(merged_path)
 
         # ── Batched generation ────────────────────────────────────
         logger.info("[%s] Generating %d samples (batched) …", lang_code, n)
@@ -662,10 +674,11 @@ class MultilingualEvaluator:
         pred_ppl_list = _compute_perplexity_vllm(predictions, llm)
         ref_ppl_list  = _compute_perplexity_vllm(references,  llm)
 
-        # ── Release vLLM and merged model temp dir ────────────────
-        self._release_llm(llm)
-        shutil.rmtree(merged_path, ignore_errors=True)
-        logger.info("[%s] Released merged model and freed GPU memory.", lang_code)
+        # ── Release vLLM if per-language (adapter mode) ───────────
+        if not self.base_model_only:
+            self._release_llm(llm)
+            shutil.rmtree(merged_path, ignore_errors=True)
+            logger.info("[%s] Released merged model and freed GPU memory.", lang_code)
 
         # ── BERTScore ─────────────────────────────────────────────
         logger.info("[%s] Computing BERTScore …", lang_code)
@@ -771,6 +784,9 @@ class MultilingualEvaluator:
                     result.pop("predictions"),
                     result.pop("references"),
                 )
+
+        # ── Free base LLM before judge loads (base_model_only mode) ─
+        self._release_base_llm()
 
         # ── Phase 2: judge all languages ──────────────────────────
         for lang_code, (predictions, references) in tqdm(

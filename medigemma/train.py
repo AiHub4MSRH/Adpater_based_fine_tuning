@@ -36,7 +36,6 @@ from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from transformers import (
     AutoModelForImageTextToText,
     AutoProcessor,
-    BitsAndBytesConfig,
     DataCollatorForLanguageModeling,
 )
 from transformers import EarlyStoppingCallback
@@ -66,17 +65,9 @@ def load_base_model(cfg: TrainingConfig):
     practical on constrained hardware.
     """
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
-
     logger.info("Loading base model: %s", cfg.model_id)
     model = AutoModelForImageTextToText.from_pretrained(
         cfg.model_id,
-        quantization_config=bnb_config,
         device_map="auto",
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
@@ -101,7 +92,7 @@ def build_lora_config(lang_cfg: LanguageConfig) -> LoraConfig:
     return LoraConfig(
         r=rank,
         lora_alpha=rank * 2,
-        lora_dropout=0.05,
+        lora_dropout=0.0,
         bias="none",
         task_type=TaskType.CAUSAL_LM,
         target_modules=[
@@ -156,15 +147,14 @@ def build_sft_config(
         "gradient_accumulation_steps": lang_cfg.grad_accumulation,
         "learning_rate": lang_cfg.learning_rate,
         "lr_scheduler_type": "cosine",
-        "warmup_ratio": 0.05,
+        "warmup_steps": 10,
+        "weight_decay": 0.01,
+        "optim": "adamw_8bit",
         "fp16": use_fp16,
         "bf16": use_bf16,
         "logging_steps": 10,
         "eval_steps": 50 if has_eval else None,
         "save_strategy": "steps",
-        # Checkpoint writes were failing on the VM when optimizer state was
-        # serialized every 100 steps. Save less often and avoid best-model
-        # reloading so PEFT's nested checkpoint layout does not block training.
         "save_steps": 500,
         "save_total_limit": 2,
         "load_best_model_at_end": False,
@@ -442,9 +432,20 @@ def parse_args():
         help="Maximum number of test examples per dataset leaf during evaluation.",
     )
     parser.add_argument(
+        "--model_id",
+        type=str,
+        default=None,
+        help="Override the base model HF repo id (e.g. google/medgemma-1.5-4b-it).",
+    )
+    parser.add_argument(
         "--eval_only",
         action="store_true",
         help="Skip training and run evaluation on saved adapters only.",
+    )
+    parser.add_argument(
+        "--no_adapters",
+        action="store_true",
+        help="Evaluate the base model without any adapters (baseline comparison).",
     )
     parser.add_argument(
         "--adapter_repo",
@@ -493,7 +494,7 @@ def main():
             f"Supported values: {', '.join(sorted(set(SUPPORTED_LANGUAGES) | set(['aka', 'amh', 'eng', 'lug', 'swa'])))}"
         ) from exc
 
-    cfg = TrainingConfig()
+    cfg = TrainingConfig(model_id=args.model_id) if args.model_id else TrainingConfig()
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -523,7 +524,7 @@ def main():
                 output_root=output_root,
             )
 
-    if args.adapter_repo:
+    if not args.no_adapters and args.adapter_repo:
         logger.info("Downloading adapters from %s …", args.adapter_repo)
         download_adapters(
             adapter_repo=args.adapter_repo,
@@ -533,12 +534,18 @@ def main():
             hf_token=hf_token,
         )
 
-    evaluator = MultilingualEvaluator(cfg, output_root, dataset_builder=builder)
+    evaluator = MultilingualEvaluator(
+        cfg,
+        output_root,
+        dataset_builder=builder,
+        base_model_only=args.no_adapters,
+    )
     results = evaluator.evaluate_all(
         selected_languages,
         max_eval_samples=args.max_eval_samples,
     )
-    evaluator.save_report(results, output_root / "eval_report.json")
+    report_name = "eval_report_base.json" if args.no_adapters else "eval_report.json"
+    evaluator.save_report(results, output_root / report_name)
     logger.info("All done.")
 
 

@@ -36,7 +36,6 @@ from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     DataCollatorForLanguageModeling,
     EarlyStoppingCallback,
 )
@@ -74,19 +73,11 @@ def load_base_model(cfg: TrainingConfig):
     tokenizer : AutoTokenizer
         Tokenizer for meditron-7b (LlamaTokenizerFast).
     """
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
-
     logger.info("Loading base model: %s", cfg.model_id)
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model_id,
-        quantization_config=bnb_config,
         device_map="auto",
-        dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     )
     model.config.use_cache = False
@@ -127,7 +118,7 @@ def build_lora_config(lang_cfg: LanguageConfig) -> LoraConfig:
     return LoraConfig(
         r=rank,
         lora_alpha=rank * 2,
-        lora_dropout=0.05,
+        lora_dropout=0.0,
         bias="none",
         task_type=TaskType.CAUSAL_LM,
         target_modules=[
@@ -184,7 +175,9 @@ def build_sft_config(
         "gradient_accumulation_steps": lang_cfg.grad_accumulation,
         "learning_rate": lang_cfg.learning_rate,
         "lr_scheduler_type": "cosine",
-        "warmup_ratio": 0.05,
+        "warmup_steps": 10,
+        "weight_decay": 0.01,
+        "optim": "adamw_8bit",
         "fp16": use_fp16,
         "bf16": use_bf16,
         "logging_steps": 10,
@@ -192,8 +185,6 @@ def build_sft_config(
         "save_strategy": "steps",
         "save_steps": 500,
         "save_total_limit": 2,
-        # Disabled: PEFT's nested checkpoint layout can block training on some
-        # VM configurations when the optimizer state is large.
         "load_best_model_at_end": False,
         "report_to": "none",
         "gradient_checkpointing": True,
@@ -512,6 +503,11 @@ def parse_args():
         help="Skip training; run evaluation on saved adapters only.",
     )
     parser.add_argument(
+        "--no_adapters",
+        action="store_true",
+        help="Evaluate the base model without any adapters (baseline comparison).",
+    )
+    parser.add_argument(
         "--adapter_repo",
         type=str,
         default="AiHub4MSRH-Hash/hashie-srh-meditron-adapters-v2",
@@ -584,7 +580,7 @@ def main():
                 output_root=output_root,
             )
 
-    if args.adapter_repo:
+    if not args.no_adapters and args.adapter_repo:
         logger.info("Downloading adapters from %s …", args.adapter_repo)
         download_adapters(
             adapter_repo=args.adapter_repo,
@@ -594,12 +590,18 @@ def main():
             hf_token=hf_token,
         )
 
-    evaluator = MultilingualEvaluator(cfg, output_root, dataset_builder=builder)
+    evaluator = MultilingualEvaluator(
+        cfg,
+        output_root,
+        dataset_builder=builder,
+        base_model_only=args.no_adapters,
+    )
     results = evaluator.evaluate_all(
         selected_languages,
         max_eval_samples=args.max_eval_samples,
     )
-    evaluator.save_report(results, output_root / "eval_report.json")
+    report_name = "eval_report_base.json" if args.no_adapters else "eval_report.json"
+    evaluator.save_report(results, output_root / report_name)
     logger.info("All done.")
 
 
