@@ -292,22 +292,34 @@ class MultilingualDatasetBuilder:
         requiring a bespoke dataset loading script in this project.
         """
         data_files = {
-            split_name: lang_cfg.hub_split_globs(split_name)
-            for split_name in CANONICAL_SPLITS
-        }
-
+        config_names = lang_cfg.hub_config_names
         logger.info(
-            "[%s] Loading shard globs from Hub repo %s",
+            "[%s] Loading Hub configs %s from %s",
             lang_cfg.dataset_id,
+            config_names,
             self.dataset_repo,
         )
-        return load_dataset(
-            self.dataset_repo,
-            data_files=data_files,
-            revision=self.dataset_revision,
-            cache_dir=self.cache_dir,
-            token=self.hf_token,
-        )
+
+        per_config: list[DatasetDict] = []
+        for config_name in config_names:
+            ds = load_dataset(
+                self.dataset_repo,
+                name=config_name,
+                revision=self.dataset_revision,
+                cache_dir=self.cache_dir,
+                token=self.hf_token,
+            )
+            per_config.append(ds)
+
+        if len(per_config) == 1:
+            return per_config[0]
+
+        merged: dict[str, Dataset] = {}
+        all_splits = {split for ds in per_config for split in ds}
+        for split in all_splits:
+            parts = [ds[split] for ds in per_config if split in ds]
+            merged[split] = concatenate_datasets(parts)
+        return DatasetDict(merged)
 
     def _augment_low_resource(
         self,

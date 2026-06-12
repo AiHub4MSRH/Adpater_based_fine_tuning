@@ -98,22 +98,20 @@ class LanguageConfig:
     def split_globs(self, split_name: str) -> list[str]:
         return [f"{subdir}/{split_name}-*" for subdir in self.shard_subdirs]
 
-    def hub_split_globs(self, split_name: str) -> list[str]:
+    @property
+    def hub_config_names(self) -> tuple[str, ...]:
         """
-        Return shard globs for all Hub leaves that feed this adapter.
+        Return the Hub dataset config names (title-cased) for all leaves.
 
-        When hub_leaves is set, each leaf contributes its own nested glob
-        (e.g. eng/eng_uga/train-*). Falls back to split_globs() when no
-        hub_leaves are configured.
+        The Hub repo uses configs like 'Eng_Uga', 'Swa_Ken', etc.
+        When hub_leaves is set, each leaf maps to its title-cased config name.
+        Falls back to the dataset_id title-cased when no hub_leaves set.
         """
-        if not self.hub_leaves:
-            return self.split_globs(split_name)
-        globs = []
-        for leaf in self.hub_leaves:
-            lang_prefix = leaf.split("_")[0]
-            globs.append(f"{lang_prefix}/{leaf}/{split_name}-*")
-            globs.append(f"{leaf}/{split_name}-*")
-        return globs
+        leaves = self.hub_leaves if self.hub_leaves else (self.dataset_id,)
+        return tuple(
+            "_".join(part.capitalize() for part in leaf.split("_"))
+            for leaf in leaves
+        )
 
     @staticmethod
     def _title_case_token(value: str) -> str:
