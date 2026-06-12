@@ -662,7 +662,7 @@ class MultilingualEvaluator:
             logger.warning("No test split for %s. Skipping.", lang_code)
             return {"language": lang_code, "error": "no_test_data"}
 
-        n       = min(len(test_ds), max_eval_samples)
+        n       = len(test_ds) if max_eval_samples <= 0 else min(len(test_ds), max_eval_samples)
         test_ds = test_ds.shuffle(seed=42).select(range(n))
 
         prompts    = [self._build_prompt(ex["input"], language_name) for ex in test_ds]
