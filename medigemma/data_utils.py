@@ -292,7 +292,7 @@ class MultilingualDatasetBuilder:
         requiring a bespoke dataset loading script in this project.
         """
         data_files = {
-            split_name: lang_cfg.split_globs(split_name)
+            split_name: lang_cfg.hub_split_globs(split_name)
             for split_name in CANONICAL_SPLITS
         }
 

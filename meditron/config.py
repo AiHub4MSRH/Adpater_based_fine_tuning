@@ -60,6 +60,7 @@ class LanguageConfig:
     learning_rate: float = 1e-5
     early_stopping_patience: Optional[int] = 3
     transfer_from: Optional[str] = None
+    hub_leaves: tuple[str, ...] = ()
 
     @property
     def display_name(self) -> str:
@@ -97,6 +98,23 @@ class LanguageConfig:
     def split_globs(self, split_name: str) -> list[str]:
         return [f"{subdir}/{split_name}-*" for subdir in self.shard_subdirs]
 
+    def hub_split_globs(self, split_name: str) -> list[str]:
+        """
+        Return shard globs for all Hub leaves that feed this adapter.
+
+        When hub_leaves is set, each leaf contributes its own nested glob
+        (e.g. eng/eng_uga/train-*). Falls back to split_globs() when no
+        hub_leaves are configured.
+        """
+        if not self.hub_leaves:
+            return self.split_globs(split_name)
+        globs = []
+        for leaf in self.hub_leaves:
+            lang_prefix = leaf.split("_")[0]
+            globs.append(f"{lang_prefix}/{leaf}/{split_name}-*")
+            globs.append(f"{leaf}/{split_name}-*")
+        return globs
+
     @staticmethod
     def _title_case_token(value: str) -> str:
         return "_".join(part.capitalize() for part in value.split("_"))
@@ -113,6 +131,7 @@ SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
         script="latin",
         resource_level="low",
         transfer_from="eng",
+        hub_leaves=("aka_gha",),
     ),
     # ── Amharic (all countries combined) ────────────────────────────────────
     "amh": LanguageConfig(
@@ -124,6 +143,7 @@ SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
         script="geez",
         resource_level="low",
         transfer_from="eng",
+        hub_leaves=("amh_eth",),
     ),
     # ── English (all countries combined) ────────────────────────────────────
     "eng": LanguageConfig(
@@ -134,6 +154,7 @@ SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
         country_name="",
         script="latin",
         resource_level="high",
+        hub_leaves=("eng_eth", "eng_gha", "eng_ken", "eng_uga"),
     ),
     # ── Luganda (all countries combined) ────────────────────────────────────
     "lug": LanguageConfig(
@@ -145,6 +166,7 @@ SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
         script="latin",
         resource_level="low",
         transfer_from="eng",
+        hub_leaves=("lug_uga",),
     ),
     # ── Swahili (all countries combined) ────────────────────────────────────
     "swa": LanguageConfig(
@@ -155,6 +177,7 @@ SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
         country_name="",
         script="latin",
         resource_level="medium",
+        hub_leaves=("swa_ken", "swa_uga"),
     ),
 }
 
