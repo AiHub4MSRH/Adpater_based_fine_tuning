@@ -57,7 +57,7 @@ class LanguageConfig:
     num_epochs: int = 3
     batch_size: int = 4
     grad_accumulation: int = 8
-    learning_rate: float = 1e-5
+    learning_rate: float = 5e-5
     early_stopping_patience: Optional[int] = 3
     transfer_from: Optional[str] = None
     # Original Hub leaf dataset_ids that get merged into this single adapter.

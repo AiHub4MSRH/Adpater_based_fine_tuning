@@ -92,7 +92,8 @@ def build_lora_config(lang_cfg: LanguageConfig) -> LoraConfig:
     return LoraConfig(
         r=rank,
         lora_alpha=rank * 2,
-        lora_dropout=0.0,
+        lora_dropout=0.05,
+        use_rslora=True,
         bias="none",
         task_type=TaskType.CAUSAL_LM,
         target_modules=[
@@ -147,7 +148,8 @@ def build_sft_config(
         "gradient_accumulation_steps": lang_cfg.grad_accumulation,
         "learning_rate": lang_cfg.learning_rate,
         "lr_scheduler_type": "cosine",
-        "warmup_steps": 10,
+        "warmup_ratio": 0.05,
+        "max_grad_norm": 1.0,
         "weight_decay": 0.01,
         "optim": "adamw_8bit",
         "fp16": use_fp16,
