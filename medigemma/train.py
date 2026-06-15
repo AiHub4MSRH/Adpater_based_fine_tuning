@@ -40,6 +40,7 @@ from transformers import (
 )
 from transformers import EarlyStoppingCallback
 from trl import SFTConfig, SFTTrainer
+from unsloth.chat_templates import train_on_responses_only
 
 from config import (
     LanguageConfig,
@@ -321,6 +322,12 @@ def train_language_adapter(
         processing_class=processor.tokenizer,
         data_collator=data_collator,
         callbacks=callbacks,
+    )
+
+    trainer = train_on_responses_only(
+        trainer,
+        instruction_part="<bos><start_of_turn>user",
+        response_part="<start_of_turn>model",
     )
 
     logger.info("Training %s adapter with %s train samples", language, len(train_tokens))

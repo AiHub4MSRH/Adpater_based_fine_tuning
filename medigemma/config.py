@@ -36,7 +36,7 @@ class TrainingConfig:
     """Global settings shared across all adapter runs."""
 
     model_id: str = "google/medgemma-1.5-4b-it"
-    max_seq_length: int = 1536
+    max_seq_length: int = 2048
     max_length: int = 512
     seed: int = 42
 
