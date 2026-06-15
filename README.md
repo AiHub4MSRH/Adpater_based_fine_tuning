@@ -4,7 +4,7 @@ This repository supports two LoRA/QLoRA fine-tuning pipelines for the same
 multilingual sexual and reproductive health (SRH) dataset:
 
 - `medigemma/` for `google/medgemma-4b-it`
-- `meditron train scripts/` for `epfl-llm/meditron-7b`
+- `meditron/` for `epfl-llm/meditron-7b`
 
 Both pipelines follow the same leaf-based workflow:
 
@@ -33,7 +33,7 @@ base language code like `eng` or `swa`.
 │   ├── compare_models.py
 │   ├── push_adapters_to_hub.py
 │   └── run_inference_from_hub.py
-└── meditron train scripts/
+└── meditron/
     ├── config.py
     ├── data_utils.py
     ├── prepare_data.py
@@ -49,7 +49,7 @@ base language code like `eng` or `swa`.
 | Pipeline | Base model | Model type | Folder |
 | --- | --- | --- | --- |
 | MedGemma | `google/medgemma-4b-it` | image-text-to-text | `medigemma/` |
-| Meditron | `epfl-llm/meditron-7b` | text-only causal LM | `meditron train scripts/` |
+| Meditron | `epfl-llm/meditron-7b` | text-only causal LM | `meditron/` |
 
 Use separate adapter output directories and separate Hub repos for each model
 family. Adapters trained for one base model are not interchangeable with the
@@ -111,11 +111,11 @@ export HF_TOKEN=hf_your_token_here
 
 | Task | MedGemma | Meditron |
 | --- | --- | --- |
-| Mirror data | `python3 medigemma/prepare_data.py` | `python3 'meditron train scripts/prepare_data.py'` |
-| Train or eval | `python3 medigemma/train.py` | `python3 'meditron train scripts/train.py'` |
-| Compare baseline vs adapter | `python3 medigemma/compare_models.py` | `python3 'meditron train scripts/compare_models.py'` |
-| Push adapters to Hub | `python3 medigemma/push_adapters_to_hub.py` | `python3 'meditron train scripts/push_adapters_to_hub.py'` |
-| Run Hub inference | `python3 medigemma/run_inference_from_hub.py` | `python3 'meditron train scripts/run_inference_from_hub.py'` |
+| Mirror data | `python3 medigemma/prepare_data.py` | `python3 meditron/prepare_data.py'` |
+| Train or eval | `python3 medigemma/train.py` | `python3 meditron/train.py'` |
+| Compare baseline vs adapter | `python3 medigemma/compare_models.py` | `python3 meditron/compare_models.py'` |
+| Push adapters to Hub | `python3 medigemma/push_adapters_to_hub.py` | `python3 meditron/push_adapters_to_hub.py'` |
+| Run Hub inference | `python3 medigemma/run_inference_from_hub.py` | `python3 meditron/run_inference_from_hub.py'` |
 
 ## Recommended Output Layout
 
@@ -157,7 +157,7 @@ python3 medigemma/prepare_data.py \
 Meditron:
 
 ```bash
-python3 'meditron train scripts/prepare_data.py' \
+python3 meditron/prepare_data.py' \
   --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET \
   --languages aka amh eng lug swa \
   --output_root ./data
@@ -178,7 +178,7 @@ python3 medigemma/train.py \
 Meditron:
 
 ```bash
-python3 'meditron train scripts/train.py' \
+python3 meditron/train.py' \
   --data_root ./data \
   --languages amh \
   --output_root ./adapters/meditron \
@@ -200,7 +200,7 @@ python3 medigemma/train.py \
 Meditron:
 
 ```bash
-python3 'meditron train scripts/train.py' \
+python3 meditron/train.py' \
   --data_root ./data \
   --languages eng_uga \
   --output_root ./adapters/meditron \
@@ -220,7 +220,7 @@ If you want to evaluate the exact full leaf set explicitly instead of using
 group aliases, use:
 
 ```bash
-python3 'meditron train scripts/train.py' \
+python3 meditron/train.py' \
   --eval_only \
   --data_root ./data \
   --languages eng_uga eng_eth eng_gha eng_ken aka_gha amh_eth lug_uga swa_ken swa_uga \
@@ -242,7 +242,7 @@ python3 medigemma/train.py \
 Meditron:
 
 ```bash
-python3 'meditron train scripts/train.py' \
+python3 meditron/train.py' \
   --eval_only \
   --data_root ./data \
   --languages aka amh eng lug swa \
@@ -250,7 +250,56 @@ python3 'meditron train scripts/train.py' \
   --max_eval_samples 200
 ```
 
-### 5. Train Directly From a Hugging Face Dataset Repo
+### 5. Evaluate the Base Model Without Adapters (Baseline)
+
+Use `--no_adapters` to run the base model directly, with no adapter loaded. This
+produces a baseline report you can compare against the adapter evaluation results.
+The report is saved as `eval_report_base.json` alongside the adapter report.
+
+MedGemma:
+
+```bash
+python3 medigemma/train.py \
+  --eval_only \
+  --no_adapters \
+  --data_root ./data \
+  --languages aka amh eng lug swa \
+  --output_root ./adapters/medigemma \
+  --max_eval_samples 3500 \
+  --hf_token $HF_TOKEN
+```
+
+Meditron:
+
+```bash
+python3 meditron/train.py \
+  --eval_only \
+  --no_adapters \
+  --data_root ./data \
+  --languages aka amh eng lug swa \
+  --output_root ./adapters/meditron \
+  --max_eval_samples 3500 \
+  --hf_token $HF_TOKEN
+```
+
+When `--no_adapters` is set:
+- Adapter download is skipped entirely.
+- The base model is loaded once and reused across all languages (no per-language
+  merge/unload cycle).
+- Results are written to `eval_report_base.json` so they coexist with the
+  adapter report (`eval_report.json`) in the same output directory.
+
+To compare adapter vs baseline side by side after both runs:
+
+```bash
+# adapter report
+cat ./adapters/medigemma/eval_report.json | python3 -m json.tool | grep composite_score
+
+# baseline report
+cat ./adapters/medigemma/eval_report_base.json | python3 -m json.tool | grep composite_score
+```
+
+### 6. Train Directly From a Hugging Face Dataset Repo
 
 MedGemma:
 
@@ -264,7 +313,7 @@ python3 medigemma/train.py \
 Meditron:
 
 ```bash
-python3 'meditron train scripts/train.py' \
+python3 meditron/train.py' \
   --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET \
   --languages aka amh eng lug swa \
   --output_root ./adapters/meditron
@@ -287,7 +336,7 @@ python3 medigemma/compare_models.py \
 Meditron:
 
 ```bash
-python3 'meditron train scripts/compare_models.py' \
+python3 meditron/compare_models.py' \
   --data_root ./data \
   --languages eng_uga swa_ken \
   --output_root ./adapters/meditron \
@@ -307,7 +356,7 @@ These commands write:
 If you want to push the exact full Meditron leaf set explicitly, use:
 
 ```bash
-python3 'meditron train scripts/push_adapters_to_hub.py' \
+python3 meditron/push_adapters_to_hub.py' \
   --repo_id your-org/hashie-srh-meditron-adapters \
   --output_root ./adapters/meditron \
   --languages eng_uga eng_eth eng_gha eng_ken aka_gha amh_eth lug_uga swa_ken swa_uga \
@@ -326,7 +375,7 @@ python3 medigemma/push_adapters_to_hub.py \
 Meditron:
 
 ```bash
-python3 'meditron train scripts/push_adapters_to_hub.py' \
+python3 meditron/push_adapters_to_hub.py' \
   --repo_id your-org/hashie-srh-meditron-adapters \
   --output_root ./adapters/meditron \
   --private
@@ -365,7 +414,7 @@ python3 medigemma/run_inference_from_hub.py \
 Meditron:
 
 ```bash
-python3 'meditron train scripts/run_inference_from_hub.py' \
+python3 meditron/run_inference_from_hub.py' \
   --adapter_repo your-org/hashie-srh-meditron-adapters \
   --adapter_name amh_eth \
   --prompt "What are common symptoms of an STI?"
@@ -382,7 +431,7 @@ python3 medigemma/run_inference_from_hub.py \
 ```
 
 ```bash
-python3 'meditron train scripts/run_inference_from_hub.py' \
+python3 meditron/run_inference_from_hub.py' \
   --adapter_repo your-org/hashie-srh-meditron-adapters \
   --adapter_name swa_ken \
   --prompt "Shida ya Ukimwi ni nini?" \
@@ -405,38 +454,45 @@ Mirror data:
 
 ```bash
 python3 medigemma/prepare_data.py --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET --languages aka amh eng lug swa --output_root ./data
-python3 'meditron train scripts/prepare_data.py' --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET --languages aka amh eng lug swa --output_root ./data
+python3 meditron/prepare_data.py' --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET --languages aka amh eng lug swa --output_root ./data
 ```
 
 Train one leaf:
 
 ```bash
 python3 medigemma/train.py --data_root ./data --languages amh_eth --output_root ./adapters/medigemma --max_eval_samples 100
-python3 'meditron train scripts/train.py' --data_root ./data --languages amh_eth --output_root ./adapters/meditron --max_eval_samples 100
+python3 meditron/train.py' --data_root ./data --languages amh_eth --output_root ./adapters/meditron --max_eval_samples 100
 ```
 
-Evaluate all:
+Evaluate all (with adapters):
 
 ```bash
 python3 medigemma/train.py --eval_only --data_root ./data --languages aka amh eng lug swa --output_root ./adapters/medigemma --max_eval_samples 200
-python3 'meditron train scripts/train.py' --eval_only --data_root ./data --languages aka amh eng lug swa --output_root ./adapters/meditron --max_eval_samples 200
+python3 meditron/train.py --eval_only --data_root ./data --languages aka amh eng lug swa --output_root ./adapters/meditron --max_eval_samples 200
+```
+
+Evaluate base model only (no adapters — baseline):
+
+```bash
+python3 medigemma/train.py --eval_only --no_adapters --data_root ./data --languages aka amh eng lug swa --output_root ./adapters/medigemma --max_eval_samples 200
+python3 meditron/train.py --eval_only --no_adapters --data_root ./data --languages aka amh eng lug swa --output_root ./adapters/meditron --max_eval_samples 200
 ```
 
 Evaluate the explicit nine-leaf set for Meditron:
 
 ```bash
-python3 'meditron train scripts/train.py' --eval_only --data_root ./data --languages eng_uga eng_eth eng_gha eng_ken aka_gha amh_eth lug_uga swa_ken swa_uga --output_root ./adapters/meditron --max_eval_samples 100000
+python3 meditron/train.py' --eval_only --data_root ./data --languages eng_uga eng_eth eng_gha eng_ken aka_gha amh_eth lug_uga swa_ken swa_uga --output_root ./adapters/meditron --max_eval_samples 100000
 ```
 
 Push adapters:
 
 ```bash
 python3 medigemma/push_adapters_to_hub.py --repo_id your-org/hashie-srh-medgemma-adapters --output_root ./adapters/medigemma --private
-python3 'meditron train scripts/push_adapters_to_hub.py' --repo_id your-org/hashie-srh-meditron-adapters --output_root ./adapters/meditron --private
+python3 meditron/push_adapters_to_hub.py' --repo_id your-org/hashie-srh-meditron-adapters --output_root ./adapters/meditron --private
 ```
 
 Push the explicit nine-leaf Meditron set:
 
 ```bash
-python3 'meditron train scripts/push_adapters_to_hub.py' --repo_id your-org/hashie-srh-meditron-adapters --output_root ./adapters/meditron --languages eng_uga eng_eth eng_gha eng_ken aka_gha amh_eth lug_uga swa_ken swa_uga --private
+python3 meditron/push_adapters_to_hub.py' --repo_id your-org/hashie-srh-meditron-adapters --output_root ./adapters/meditron --languages eng_uga eng_eth eng_gha eng_ken aka_gha amh_eth lug_uga swa_ken swa_uga --private
 ```

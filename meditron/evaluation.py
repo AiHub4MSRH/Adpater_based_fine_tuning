@@ -50,7 +50,7 @@ import torch
 import torch.nn.functional as F
 from rouge_score import rouge_scorer
 from transformers import (
-    AutoProcessor,
+    AutoTokenizer,
     XLMRobertaModel,
     XLMRobertaTokenizer,
 )
@@ -58,6 +58,7 @@ from vllm import LLM, SamplingParams
 
 from config import TrainingConfig, SUPPORTED_LANGUAGES
 from data_utils import MultilingualDatasetBuilder, get_split
+from prompt_utils import render_meditron_chat
 
 logger = logging.getLogger(__name__)
 
@@ -197,10 +198,9 @@ def _merge_adapter_to_disk(base_model_id: str, adapter_path: Path) -> Path:
     logger.info("Saving merged model to %s …", tmp)
     merged.save_pretrained(tmp)
 
-    # Copy the full processor (tokenizer + image processor + preprocessor_config)
-    # so vLLM can load it from the temp dir without hitting the Hub.
-    processor = AutoProcessor.from_pretrained(base_model_id, trust_remote_code=True)
-    processor.save_pretrained(tmp)
+    # Copy tokenizer so vLLM can load it from the temp dir without hitting the Hub.
+    tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
+    tokenizer.save_pretrained(tmp)
 
     # Free the CPU copy immediately — vLLM will reload from disk onto GPU
     del merged, peft_model, base
@@ -563,8 +563,8 @@ class MultilingualEvaluator:
         self.tensor_parallel        = tensor_parallel
         self.gpu_memory_utilization = gpu_memory_utilization
         self.base_model_only        = base_model_only
-        self._processor             = AutoProcessor.from_pretrained(cfg.model_id)
-        self._base_llm: Optional[LLM] = None  # shared instance for base-model-only mode
+        self._tokenizer             = AutoTokenizer.from_pretrained(cfg.model_id)
+        self._base_llm: Optional[LLM] = None
 
     def _load_merged_llm(self, merged_model_path: Path) -> LLM:
         """Load a merged (or base) model from disk into vLLM."""
@@ -591,7 +591,6 @@ class MultilingualEvaluator:
         return self._base_llm
 
     def _release_base_llm(self) -> None:
-        """Release the shared base model LLM (call after evaluate_all completes)."""
         if self._base_llm is not None:
             self._release_llm(self._base_llm)
             self._base_llm = None
@@ -609,22 +608,8 @@ class MultilingualEvaluator:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def _build_prompt(self, prompt: str, language_name: str) -> str:
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful sexual and reproductive health assistant. "
-                    f"Answer in {language_name}."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ]
-        return self._processor.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+    def _build_prompt(self, prompt: str) -> str:
+        return render_meditron_chat(user_text=prompt, add_generation_prompt=True)
 
     def _generate_and_score(
         self,
@@ -662,10 +647,10 @@ class MultilingualEvaluator:
             logger.warning("No test split for %s. Skipping.", lang_code)
             return {"language": lang_code, "error": "no_test_data"}
 
-        n       = len(test_ds) if max_eval_samples <= 0 else min(len(test_ds), max_eval_samples)
+        n       = min(len(test_ds), max_eval_samples)
         test_ds = test_ds.shuffle(seed=42).select(range(n))
 
-        prompts    = [self._build_prompt(ex["input"], language_name) for ex in test_ds]
+        prompts    = [self._build_prompt(ex["input"]) for ex in test_ds]
         references = [ex["output"] for ex in test_ds]
 
         # ── Load model (base-only or adapter-merged) ──────────────
@@ -674,9 +659,6 @@ class MultilingualEvaluator:
             llm         = self._ensure_base_llm()
             merged_path = None
         else:
-            if adapter_path is None:
-                logger.warning("Adapter not found for %s; skipping.", lang_code)
-                return {"language": lang_code, "error": "adapter_not_found"}
             merged_path = _merge_adapter_to_disk(self.cfg.model_id, adapter_path)
             llm         = self._load_merged_llm(merged_path)
 
