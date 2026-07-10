@@ -17,9 +17,9 @@ the processor, so we work with `tokenizer` directly throughout.
 
 Training design
 ---------------
-One LoRA adapter is trained per dataset leaf (e.g. eng_eth, eng_uga). This
-prevents gradient interference between geographically/culturally distinct
-corpora and keeps adapter outputs traceable to a concrete dataset.
+One LoRA adapter is trained per deployment target. Some targets map to a single
+dataset leaf, while English and Swahili combine country-specific leaves into
+one adapter each: `adapter_eng` and `adapter_swa`.
 """
 
 import argparse
@@ -58,6 +58,49 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+PRECISION_CHOICES = ("full_lora", "qlora")
+
+
+def select_model_dtype() -> torch.dtype:
+    """Pick the best non-quantized dtype supported by the current hardware."""
+
+    if not torch.cuda.is_available():
+        return torch.float32
+    if hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float16
+
+
+def build_model_load_kwargs(cfg: TrainingConfig) -> dict:
+    """Build model-loading kwargs for full-precision LoRA or QLoRA."""
+
+    dtype = select_model_dtype()
+    kwargs = {
+        "device_map": "auto",
+        "dtype": dtype,
+        "trust_remote_code": True,
+    }
+
+    if cfg.training_precision == "qlora":
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=(
+                dtype if dtype in (torch.bfloat16, torch.float16) else torch.bfloat16
+            ),
+        )
+        logger.info("Using QLoRA: loading base model in 4-bit.")
+    elif cfg.training_precision == "full_lora":
+        logger.info("Using full-precision LoRA: loading base model with dtype=%s.", dtype)
+    else:
+        raise ValueError(
+            f"Unsupported training precision '{cfg.training_precision}'. "
+            f"Expected one of: {', '.join(PRECISION_CHOICES)}"
+        )
+
+    return kwargs
+
 
 # ---------------------------------------------------------------------------
 # Model + tokenizer loading
@@ -65,29 +108,23 @@ logger = logging.getLogger(__name__)
 
 def load_base_model(cfg: TrainingConfig):
     """
-    Load meditron-7b in 4-bit (QLoRA) mode with its tokenizer.
+    Load meditron-7b with its tokenizer for LoRA training.
+
+    By default this uses a non-quantized base model (`full_lora`). Use
+    `training_precision="qlora"` for 4-bit loading on constrained hardware.
 
     Returns
     -------
     model : AutoModelForCausalLM
-        Quantized base model ready for PEFT wrapping.
+        Base model ready for PEFT wrapping.
     tokenizer : AutoTokenizer
         Tokenizer for meditron-7b (LlamaTokenizerFast).
     """
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
 
     logger.info("Loading base model: %s", cfg.model_id)
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model_id,
-        quantization_config=bnb_config,
-        device_map="auto",
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
+        **build_model_load_kwargs(cfg),
     )
     model.config.use_cache = False
     model.enable_input_require_grads()
@@ -267,9 +304,9 @@ def train_language_adapter(
     output_root: Path,
 ) -> str:
     """
-    Fine-tune one LoRA adapter for a dataset leaf (e.g. eng_eth).
+    Fine-tune one LoRA adapter for a target like `eng`, `swa`, or `lug_uga`.
 
-    The adapter directory name mirrors the dataset leaf name so downstream
+    The adapter directory name mirrors the adapter target so downstream
     inference and evaluation are unambiguous.
     """
     logger.info("═══ Starting adapter training for dataset: %s ═══", language)
@@ -407,6 +444,8 @@ def train_language_adapter(
         "train_samples": len(train_tokens),
         "dev_samples":   len(eval_tokens) if eval_tokens is not None else 0,
         "base_model":    cfg.model_id,
+        "training_precision": cfg.training_precision,
+        "source_datasets": list(lang_cfg.source_datasets or (language,)),
     }
     with open(adapter_output_dir / "adapter_meta.json", "w", encoding="utf-8") as fh:
         json.dump(metadata, fh, indent=2, ensure_ascii=False)
@@ -459,15 +498,15 @@ def load_adapter_for_inference(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Train per-dataset-leaf LoRA adapters on meditron-7b"
+        description="Train adapter-target LoRA adapters on meditron-7b"
     )
     parser.add_argument(
         "--languages",
         nargs="+",
         default=list(SUPPORTED_LANGUAGES.keys()),
         help=(
-            "Dataset leaves or base language groups to train. "
-            "Examples: eng_uga, swa_ken, or grouped like eng, swa."
+            "Adapter targets, language groups, or legacy source leaves to train. "
+            "Examples: eng, swa, lug_uga, or legacy selections like eng_uga."
         ),
     )
     parser.add_argument(
@@ -504,7 +543,16 @@ def parse_args():
         "--max_eval_samples",
         type=int,
         default=200,
-        help="Maximum test examples per dataset leaf during evaluation.",
+        help="Maximum test examples per adapter target during evaluation.",
+    )
+    parser.add_argument(
+        "--precision",
+        choices=PRECISION_CHOICES,
+        default=TrainingConfig().training_precision,
+        help=(
+            "Model loading precision. `full_lora` loads the base model without "
+            "4-bit quantization; `qlora` uses 4-bit loading for lower memory."
+        ),
     )
     parser.add_argument(
         "--eval_only",
@@ -542,10 +590,10 @@ def main():
     except KeyError as exc:
         raise SystemExit(
             f"Unsupported language or dataset selection: {exc.args[0]}. "
-            f"Supported: {', '.join(sorted(set(SUPPORTED_LANGUAGES) | {'aka', 'amh', 'eng', 'lug', 'swa'}))}"
+            f"Supported: {', '.join(sorted(set(SUPPORTED_LANGUAGES) | {'aka', 'amh', 'eng', 'lug', 'swa', 'eng_uga', 'swa_ken'}))}"
         ) from exc
 
-    cfg = TrainingConfig()
+    cfg = TrainingConfig(training_precision=args.precision)
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 

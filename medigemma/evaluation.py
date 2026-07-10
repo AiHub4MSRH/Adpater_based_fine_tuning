@@ -1,12 +1,12 @@
 """
-evaluation.py — Multilingual evaluation for per-dataset-leaf LoRA adapters
-===========================================================================
+evaluation.py — Multilingual evaluation for adapter-target LoRA adapters
+========================================================================
 
 Evaluation design notes
 -----------------------
-Evaluation is keyed by dataset leaf for the same reason training is: the real
-unit of data is `eng_uga`, `swa_ken`, `aka_gha`, and so on, not just `eng` or
-`swa`.
+Evaluation is keyed by adapter target. English and Swahili targets evaluate on
+combined source leaves, while targets such as `aka_gha` and `lug_uga` evaluate
+on a single source leaf.
 
 This module deliberately reloads test data through the shared dataset builder so
 that training and evaluation read from the same source abstraction:
@@ -36,6 +36,49 @@ from config import TrainingConfig, SUPPORTED_LANGUAGES
 from data_utils import MultilingualDatasetBuilder, get_split
 
 logger = logging.getLogger(__name__)
+
+PRECISION_CHOICES = ("full_lora", "qlora")
+
+
+def select_model_dtype() -> torch.dtype:
+    """Pick the best non-quantized dtype supported by the current hardware."""
+
+    if not torch.cuda.is_available():
+        return torch.float32
+    if hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float16
+
+
+def build_model_load_kwargs(cfg: TrainingConfig) -> dict:
+    """Build evaluation model-loading kwargs for full LoRA or QLoRA adapters."""
+
+    dtype = select_model_dtype()
+    kwargs = {
+        "device_map": "auto",
+        "torch_dtype": dtype,
+        "trust_remote_code": True,
+    }
+
+    if cfg.training_precision == "qlora":
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=(
+                dtype if dtype in (torch.bfloat16, torch.float16) else torch.bfloat16
+            ),
+        )
+        logger.info("Evaluating with QLoRA 4-bit base model loading.")
+    elif cfg.training_precision == "full_lora":
+        logger.info("Evaluating with full-precision base model dtype=%s.", dtype)
+    else:
+        raise ValueError(
+            f"Unsupported training precision '{cfg.training_precision}'. "
+            f"Expected one of: {', '.join(PRECISION_CHOICES)}"
+        )
+
+    return kwargs
 
 
 def resolve_adapter_path(adapter_root: Path, lang_code: str) -> Optional[Path]:
@@ -104,11 +147,11 @@ def _rouge_l(prediction: str, reference: str) -> float:
 
 class MultilingualEvaluator:
     """
-    Evaluate adapters on the `test-*` split for each configured dataset leaf.
+    Evaluate adapters on the `test-*` split for each configured adapter target.
 
-    The adapter path and dataset path are both resolved from the same leaf ID,
-    which avoids accidental cross-evaluation such as testing `adapter_eng_uga`
-    on `eng_gha` data.
+    The adapter path and dataset path are both resolved from the same target ID,
+    which avoids accidental cross-evaluation such as testing `adapter_eng` on
+    non-English data.
     """
 
     def __init__(
@@ -124,22 +167,13 @@ class MultilingualEvaluator:
         self._processor = None
 
     def _ensure_base_loaded(self):
-        """Lazily load the shared quantized base model once for evaluation."""
+        """Lazily load the shared base model once for evaluation."""
         if self._base_model is not None:
             return
 
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-        )
         self._base_model = AutoModelForImageTextToText.from_pretrained(
             self.cfg.model_id,
-            quantization_config=bnb_config,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
+            **build_model_load_kwargs(self.cfg),
         )
         self._processor = AutoProcessor.from_pretrained(self.cfg.model_id)
         self._processor.tokenizer.padding_side = "right"
@@ -205,7 +239,7 @@ class MultilingualEvaluator:
         max_eval_samples: int = 200,
     ) -> dict[str, Any]:
         """
-        Run evaluation for one dataset leaf and return aggregate metrics.
+        Run evaluation for one adapter target and return aggregate metrics.
 
         The test split is subsampled for speed when `max_eval_samples` is lower
         than the full test size.

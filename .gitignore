@@ -1,0 +1,57 @@
+# macOS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+
+# Local datasets, model outputs, and experiment artifacts
+data/
+adapters/
+outputs/
+checkpoints/
+checkpoint-*/
+mlruns/
+wandb/
+runs/
+logs/
+*.log
+
+# Hugging Face / training caches
+.cache/
+cache/
+hf_cache/
+transformers_cache/
+
+# Large model and tensor artifacts
+*.bin
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+*.onnx

@@ -4,25 +4,23 @@ config.py — Training and dataset configuration for multilingual SRH adapters
 
 Design notes
 ------------
-This project no longer treats a bare language code such as `eng` or `swa` as
-the unit of training. Your real Hugging Face dataset is organised into leaves
-such as `eng_uga`, `eng_ken`, `swa_uga`, and `aka_gha`, so the registry below
-models those leaves directly.
+This project trains one adapter for each deployment language target. Some
+targets map directly to a single dataset leaf such as `aka_gha` or `lug_uga`.
+English and Swahili intentionally combine multiple country leaves into one
+adapter each: `eng` and `swa`.
 
 Why this matters:
-1. The country suffix is part of the dataset identity, not incidental metadata.
-   `eng_uga` and `eng_gha` may differ in terminology, orthography, examples,
-   and SRH phrasing conventions even though both are English.
-2. Adapter naming should stay aligned with the actual data leaf to avoid
-   ambiguity during training, evaluation, and deployment.
-3. The CLI still supports grouped selections such as `eng` or `swa`, but those
-   are now just conveniences that expand to the concrete dataset leaves.
+1. Dataset leaves remain the source-of-truth for loading local or Hub shards.
+2. Adapter naming stays aligned with deployment targets, so English produces
+   `adapter_eng` and Swahili produces `adapter_swa`.
+3. Legacy leaf selections such as `eng_uga` and `swa_ken` are accepted by the
+   CLI, but they resolve to the combined adapter target.
 
 Configuration philosophy
 ------------------------
 * `TrainingConfig` holds global model-level defaults shared across all runs.
-* `LanguageConfig` is really a per-dataset-leaf config. The historical name is
-  retained to minimise churn across the rest of the codebase.
+* `LanguageConfig` can describe either a concrete source leaf or a combined
+  adapter target.
 * Resource-level tuning still exists because some leaves are lower-resource than
   others and benefit from lower-rank LoRA, more epochs, and donor augmentation.
 """
@@ -38,11 +36,12 @@ class TrainingConfig:
     model_id: str = "epfl-llm/meditron-7b"
     max_seq_length: int = 1024
     seed: int = 42
+    training_precision: str = "full_lora"
 
 
 @dataclass(frozen=True)
 class LanguageConfig:
-    """Per-variant training configuration for a Hub-hosted dataset leaf."""
+    """Training configuration for a source leaf or adapter target."""
 
     dataset_id: str
     language_code: str
@@ -59,6 +58,7 @@ class LanguageConfig:
     learning_rate: float = 2e-4
     early_stopping_patience: Optional[int] = 3
     transfer_from: Optional[str] = None
+    source_datasets: tuple[str, ...] = ()
 
     @property
     def display_name(self) -> str:
@@ -99,7 +99,7 @@ class LanguageConfig:
         return "_".join(part.capitalize() for part in value.split("_"))
 
 
-SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
+SOURCE_DATASETS: dict[str, LanguageConfig] = {
     # ── Akan / Ghana ────────────────────────────────────────────────────────
     "aka_gha": LanguageConfig(
         dataset_id="aka_gha",
@@ -113,7 +113,7 @@ SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
         num_epochs=10,
         learning_rate=1e-4,
         early_stopping_patience=5,
-        transfer_from="eng_gha",
+        transfer_from="eng",
     ),
     # ── Amharic / Ethiopia ──────────────────────────────────────────────────
     "amh_eth": LanguageConfig(
@@ -128,7 +128,7 @@ SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
         num_epochs=10,
         learning_rate=1e-4,
         early_stopping_patience=5,
-        transfer_from="eng_eth",
+        transfer_from="eng",
     ),
     # ── English variants ────────────────────────────────────────────────────
     "eng_eth": LanguageConfig(
@@ -196,7 +196,7 @@ SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
         num_epochs=10,
         learning_rate=1e-4,
         early_stopping_patience=5,
-        transfer_from="eng_uga",
+        transfer_from="eng",
     ),
     # ── Swahili variants ────────────────────────────────────────────────────
     "swa_ken": LanguageConfig(
@@ -229,24 +229,63 @@ SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
 }
 
 
+SUPPORTED_LANGUAGES: dict[str, LanguageConfig] = {
+    "aka_gha": SOURCE_DATASETS["aka_gha"],
+    "amh_eth": SOURCE_DATASETS["amh_eth"],
+    "eng": LanguageConfig(
+        dataset_id="eng",
+        language_code="eng",
+        language_name="English",
+        country_code="multi",
+        country_name="Ethiopia, Ghana, Kenya, Uganda",
+        script="latin",
+        resource_level="high",
+        lora_r=32,
+        num_epochs=5,
+        learning_rate=2e-4,
+        early_stopping_patience=3,
+        source_datasets=("eng_eth", "eng_gha", "eng_ken", "eng_uga"),
+    ),
+    "lug_uga": SOURCE_DATASETS["lug_uga"],
+    "swa": LanguageConfig(
+        dataset_id="swa",
+        language_code="swa",
+        language_name="Swahili",
+        country_code="multi",
+        country_name="Kenya, Uganda",
+        script="latin",
+        resource_level="medium",
+        lora_r=32,
+        num_epochs=6,
+        learning_rate=2e-4,
+        early_stopping_patience=3,
+        source_datasets=("swa_ken", "swa_uga"),
+    ),
+}
+
+
 LANGUAGE_GROUPS: dict[str, list[str]] = {
     "aka": ["aka_gha"],
     "amh": ["amh_eth"],
-    "eng": ["eng_eth", "eng_gha", "eng_ken", "eng_uga"],
+    "eng": ["eng"],
+    "eng_eth": ["eng"],
+    "eng_gha": ["eng"],
+    "eng_ken": ["eng"],
+    "eng_uga": ["eng"],
     "lug": ["lug_uga"],
-    "swa": ["swa_ken", "swa_uga"],
+    "swa": ["swa"],
+    "swa_ken": ["swa"],
+    "swa_uga": ["swa"],
 }
 
 
 def expand_language_selection(selections: list[str]) -> list[str]:
     """
-    Expand CLI selections so users can pass either dataset leaves (`eng_uga`)
-    or base language groups (`eng`).
+    Expand CLI selections into adapter targets.
 
     Examples:
-    * `["eng"]` expands to all English dataset leaves.
-    * `["swa_ken", "eng"]` preserves the explicitly requested leaf and then
-      appends the grouped English leaves without duplicates.
+    * `["eng"]` resolves to the combined English adapter target.
+    * `["swa_ken"]` resolves to the combined Swahili adapter target.
     """
 
     expanded: list[str] = []

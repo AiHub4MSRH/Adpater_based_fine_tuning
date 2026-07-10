@@ -16,7 +16,7 @@ Changes from original
 
 This script runs the same evaluation prompts through:
 1. a baseline meditron-7b checkpoint
-2. each leaf-specific LoRA adapter
+2. each adapter-target LoRA adapter
 
 It saves:
 * a row-level CSV for manual review
@@ -57,7 +57,7 @@ def parse_args():
         description="Compare baseline meditron-7b generations against saved LoRA adapters"
     )
     parser.add_argument("--languages",      nargs="+", default=list(SUPPORTED_LANGUAGES.keys()),
-                        help="Dataset leaves or grouped selections such as `eng` and `swa`.")
+                        help="Adapter targets, legacy leaves, or grouped selections such as `eng` and `swa`.")
     parser.add_argument("--data_root",      type=str, default="./data",
                         help="Local mirror root for save_to_disk data or shard trees.")
     parser.add_argument("--dataset_repo",   type=str, default=None,
@@ -75,7 +75,7 @@ def parse_args():
     parser.add_argument("--split",          type=str, choices=("train", "dev", "test"), default="test",
                         help="Dataset split to compare on. Defaults to `test`.")
     parser.add_argument("--max_eval_samples", type=int, default=200,
-                        help="Maximum number of examples per dataset leaf.")
+                        help="Maximum number of examples per adapter target.")
     parser.add_argument("--max_new_tokens", type=int, default=256,
                         help="Maximum number of tokens to generate per example.")
     parser.add_argument("--load_in_4bit",   action="store_true",

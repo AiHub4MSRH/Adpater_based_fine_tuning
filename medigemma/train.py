@@ -4,15 +4,14 @@ train.py — Per-dataset-leaf LoRA adapter fine-tuning for MedGemma
 
 Training design rationale
 -------------------------
-This code trains one LoRA adapter per dataset leaf, not one adapter per bare
-language code. In your dataset, `eng_uga`, `eng_gha`, and `eng_ken` are distinct
-training targets because the country-specific leaf is part of the real corpus
-identity and may encode different phrasing, examples, and SRH guidance style.
+This code trains one LoRA adapter per deployment target. Some targets map to a
+single dataset leaf, while English and Swahili combine country-specific leaves
+into one adapter each: `adapter_eng` and `adapter_swa`.
 
-Why separate adapters per leaf?
-* It prevents gradient interference between different leaves.
-* It keeps evaluation and deployment aligned with the dataset you actually have.
-* It makes adapter outputs traceable back to a concrete corpus leaf.
+Why combined English and Swahili adapters?
+* It gives each adapter more data and reduces fragmentation.
+* It keeps deployment simple with one adapter per language family.
+* Adapter metadata still records the concrete source leaves for traceability.
 
 Why a shared dataset loader?
 * The original training path assumed `load_from_disk(data/<lang_code>)`.
@@ -57,29 +56,62 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+PRECISION_CHOICES = ("full_lora", "qlora")
+
+
+def select_model_dtype() -> torch.dtype:
+    """Pick the best non-quantized dtype supported by the current hardware."""
+
+    if not torch.cuda.is_available():
+        return torch.float32
+    if hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float16
+
+
+def build_model_load_kwargs(cfg: TrainingConfig) -> dict:
+    """Build model-loading kwargs for full-precision LoRA or QLoRA."""
+
+    dtype = select_model_dtype()
+    kwargs = {
+        "device_map": "auto",
+        "torch_dtype": dtype,
+        "trust_remote_code": True,
+    }
+
+    if cfg.training_precision == "qlora":
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=(
+                dtype if dtype in (torch.bfloat16, torch.float16) else torch.bfloat16
+            ),
+        )
+        logger.info("Using QLoRA: loading base model in 4-bit.")
+    elif cfg.training_precision == "full_lora":
+        logger.info("Using full-precision LoRA: loading base model with dtype=%s.", dtype)
+    else:
+        raise ValueError(
+            f"Unsupported training precision '{cfg.training_precision}'. "
+            f"Expected one of: {', '.join(PRECISION_CHOICES)}"
+        )
+
+    return kwargs
+
 
 def load_base_model(cfg: TrainingConfig):
     """
-    Load the quantized base model and processor for QLoRA training.
+    Load the base model and processor for LoRA training.
 
-    The base model is loaded in 4-bit mode so the adapter training path remains
-    practical on constrained hardware.
+    By default this uses a non-quantized base model (`full_lora`). Use
+    `training_precision="qlora"` for 4-bit loading on constrained hardware.
     """
-
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
 
     logger.info("Loading base model: %s", cfg.model_id)
     model = AutoModelForImageTextToText.from_pretrained(
         cfg.model_id,
-        quantization_config=bnb_config,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
+        **build_model_load_kwargs(cfg),
     )
     model.config.use_cache = False
     model.enable_input_require_grads()
@@ -211,9 +243,9 @@ def train_language_adapter(
     output_root: Path,
 ) -> str:
     """
-    Fine-tune one LoRA adapter for a dataset leaf like `eng_uga`.
+    Fine-tune one LoRA adapter for a target like `eng`, `swa`, or `lug_uga`.
 
-    The adapter directory name intentionally mirrors the dataset leaf name so
+    The adapter directory name intentionally mirrors the adapter target so
     downstream inference and evaluation remain unambiguous.
     """
 
@@ -350,6 +382,8 @@ def train_language_adapter(
         "train_samples": len(train_tokens),
         "dev_samples": len(eval_tokens) if eval_tokens is not None else 0,
         "base_model": cfg.model_id,
+        "training_precision": cfg.training_precision,
+        "source_datasets": list(lang_cfg.source_datasets or (language,)),
     }
     with open(adapter_output_dir / "adapter_meta.json", "w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2, ensure_ascii=False)
@@ -394,15 +428,15 @@ def load_adapter_for_inference(
 def parse_args():
     """Define CLI arguments for training and evaluation against Hub or local data."""
     parser = argparse.ArgumentParser(
-        description="Train per-dataset-leaf LoRA adapters on MedGemma"
+        description="Train adapter-target LoRA adapters on MedGemma"
     )
     parser.add_argument(
         "--languages",
         nargs="+",
         default=list(SUPPORTED_LANGUAGES.keys()),
         help=(
-            "Dataset leaves or base language groups to train. Examples: "
-            "`eng_uga`, `swa_ken`, or grouped selections like `eng` and `swa`."
+            "Adapter targets, language groups, or legacy source leaves to train. "
+            "Examples: `eng`, `swa`, `lug_uga`, or legacy selections like `eng_uga`."
         ),
     )
     parser.add_argument(
@@ -439,7 +473,16 @@ def parse_args():
         "--max_eval_samples",
         type=int,
         default=200,
-        help="Maximum number of test examples per dataset leaf during evaluation.",
+        help="Maximum number of test examples per adapter target during evaluation.",
+    )
+    parser.add_argument(
+        "--precision",
+        choices=PRECISION_CHOICES,
+        default=TrainingConfig().training_precision,
+        help=(
+            "Model loading precision. `full_lora` loads the base model without "
+            "4-bit quantization; `qlora` uses 4-bit loading for lower memory."
+        ),
     )
     parser.add_argument(
         "--eval_only",
@@ -460,8 +503,8 @@ def main():
     Entry point for training and/or evaluation.
 
     The CLI accepts either grouped language selections such as `eng` or explicit
-    dataset leaves such as `eng_uga`. Grouped selections are expanded before any
-    data loading begins.
+    legacy source leaves such as `eng_uga`. Selections are resolved to adapter
+    targets before any data loading begins.
     """
     args = parse_args()
 
@@ -481,10 +524,10 @@ def main():
     except KeyError as exc:
         raise SystemExit(
             f"Unsupported language or dataset selection: {exc.args[0]}. "
-            f"Supported values: {', '.join(sorted(set(SUPPORTED_LANGUAGES) | set(['aka', 'amh', 'eng', 'lug', 'swa'])))}"
+            f"Supported values: {', '.join(sorted(set(SUPPORTED_LANGUAGES) | set(['aka', 'amh', 'eng', 'lug', 'swa', 'eng_uga', 'swa_ken'])))}"
         ) from exc
 
-    cfg = TrainingConfig()
+    cfg = TrainingConfig(training_precision=args.precision)
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 

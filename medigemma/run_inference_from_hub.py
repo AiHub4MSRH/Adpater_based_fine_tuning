@@ -4,7 +4,7 @@ run_inference_from_hub.py — Sample inference script for Hub-hosted adapters
 
 Purpose
 -------
-This script downloads a specific adapter leaf from a Hugging Face repo created
+This script downloads a specific adapter target from a Hugging Face repo created
 by `push_adapters_to_hub.py`, loads the base model referenced by the adapter
 metadata, and runs a single SRH generation example.
 
@@ -12,7 +12,7 @@ Expected Hub layout
 -------------------
 <repo root>/
   adapters/
-    eng_uga/
+    eng/
       adapter_meta.json
       adapter_config.json
       adapter_model.safetensors
@@ -22,7 +22,7 @@ Example
 -------
 python3 run_inference_from_hub.py \
   --adapter_repo your-org/hashie-srh-adapters \
-  --adapter_name eng_uga \
+  --adapter_name eng \
   --prompt "What are common symptoms of an STI?"
 """
 
@@ -77,7 +77,7 @@ def parse_args():
         "--adapter_name",
         type=str,
         required=True,
-        help="Dataset leaf name, for example `eng_uga` or `swa_ken`.",
+        help="Adapter target name, for example `eng`, `swa`, or `lug_uga`.",
     )
     parser.add_argument(
         "--prompt",

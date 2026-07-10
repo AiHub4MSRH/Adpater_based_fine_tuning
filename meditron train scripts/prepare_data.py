@@ -10,7 +10,7 @@ source is already a Hugging Face-hosted multilingual SRH dataset with shard
 files arranged by language and country leaf.
 
 This script now exists for a different purpose:
-* download selected dataset leaves from the Hub
+* download selected adapter targets from the Hub
 * normalize them through the shared loader
 * save them locally as `DatasetDict.save_to_disk()` caches
 
@@ -38,9 +38,9 @@ def prepare_language(
     overwrite: bool = False,
 ) -> None:
     """
-    Download one dataset leaf from the Hub and save it locally.
+    Download one adapter target from the Hub and save it locally.
 
-    The output directory uses the dataset leaf name directly, e.g. `eng_uga/`.
+    The output directory uses the adapter target name directly, e.g. `eng/`.
     """
 
     output_dir = output_root / lang_code
@@ -71,9 +71,9 @@ def prepare_language(
 
 
 def parse_args():
-    """Define CLI arguments for mirroring selected dataset leaves."""
+    """Define CLI arguments for mirroring selected adapter targets."""
     parser = argparse.ArgumentParser(
-        description="Mirror multilingual SRH dataset leaves from Hugging Face to local disk"
+        description="Mirror multilingual SRH adapter targets from Hugging Face to local disk"
     )
     parser.add_argument(
         "--dataset_repo",
@@ -91,7 +91,7 @@ def parse_args():
         "--languages",
         nargs="+",
         default=list(SUPPORTED_LANGUAGES.keys()),
-        help="Dataset leaves or language groups to mirror locally.",
+        help="Adapter targets, legacy leaves, or language groups to mirror locally.",
     )
     parser.add_argument(
         "--output_root",
@@ -120,7 +120,7 @@ def parse_args():
 
 
 def main():
-    """Entry point for mirroring Hub-hosted SRH leaves into local caches."""
+    """Entry point for mirroring Hub-hosted SRH adapter targets into local caches."""
     args = parse_args()
     hf_token = args.hf_token or os.environ.get("HF_TOKEN")
 

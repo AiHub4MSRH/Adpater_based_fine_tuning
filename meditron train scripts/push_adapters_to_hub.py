@@ -7,8 +7,8 @@ Purpose
 Training writes adapters locally as:
 
     adapters/
-      adapter_eng_uga/
-      adapter_swa_ken/
+      adapter_eng/
+      adapter_swa/
       ...
 
 This script publishes those folders into a single Hugging Face model repo under:
@@ -17,7 +17,7 @@ This script publishes those folders into a single Hugging Face model repo under:
 
 Why a single repo?
 ------------------
-* It keeps all multilingual adapter leaves versioned together.
+* It keeps all multilingual adapter targets versioned together.
 * It makes discovery easier for downstream inference scripts.
 * It lets us publish a shared manifest and model card once.
 
@@ -27,12 +27,12 @@ Repository layout on the Hub
   README.md
   adapters/
     manifest.json
-    eng_uga/
+    eng/
       adapter_config.json
       adapter_model.safetensors
       adapter_meta.json
       ...
-    swa_ken/
+    swa/
       ...
   reports/
     eval_report.json   (optional)
@@ -48,7 +48,7 @@ from pathlib import Path
 
 from huggingface_hub import HfApi
 
-from config import expand_language_selection
+from config import SUPPORTED_LANGUAGES, expand_language_selection
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -96,7 +96,7 @@ def parse_args():
         "--languages",
         nargs="+",
         default=None,
-        help="Optional dataset leaves or grouped language selections to publish.",
+        help="Optional adapter targets, legacy leaves, or grouped selections to publish.",
     )
     parser.add_argument(
         "--revision",
@@ -128,8 +128,10 @@ def resolve_adapter_dirs(output_root: Path, selections: list[str] | None) -> lis
     """
     Resolve which local adapter folders should be uploaded.
 
-    If no explicit selections are provided, all `adapter_*` directories under
-    `output_root` are published.
+    If no explicit selections are provided, existing current-target adapter
+    directories under `output_root` are published. Legacy leaf adapter folders
+    such as `adapter_eng_uga` are intentionally ignored unless they are mapped
+    through an explicit selection that resolves to a current target.
     """
 
     if selections:
@@ -140,7 +142,13 @@ def resolve_adapter_dirs(output_root: Path, selections: list[str] | None) -> lis
         for path in sorted(output_root.glob("adapter_*")):
             if path.is_dir():
                 dataset_id = path.name.removeprefix("adapter_")
-                adapter_dirs.append((dataset_id, path))
+                if dataset_id in SUPPORTED_LANGUAGES:
+                    adapter_dirs.append((dataset_id, path))
+
+    if not adapter_dirs:
+        raise FileNotFoundError(
+            f"No current adapter target directories were found under {output_root}."
+        )
 
     missing = [str(path) for _, path in adapter_dirs if not path.exists()]
     if missing:
@@ -208,7 +216,7 @@ Available adapters:
 ```bash
 python3 run_inference_from_hub.py \\
   --adapter_repo {repo_id} \\
-  --adapter_name {adapter_names[0] if adapter_names else "eng_uga"} \\
+  --adapter_name {adapter_names[0] if adapter_names else "eng"} \\
   --prompt "What are common symptoms of an STI?"
 ```
 """

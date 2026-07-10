@@ -49,7 +49,7 @@ def parse_args():
         "--languages",
         nargs="+",
         default=list(SUPPORTED_LANGUAGES.keys()),
-        help="Dataset leaves or grouped selections such as `eng` and `swa`.",
+        help="Adapter targets, legacy leaves, or grouped selections such as `eng` and `swa`.",
     )
     parser.add_argument(
         "--data_root",
@@ -110,7 +110,7 @@ def parse_args():
         "--max_eval_samples",
         type=int,
         default=200,
-        help="Maximum number of examples per dataset leaf.",
+        help="Maximum number of examples per adapter target.",
     )
     parser.add_argument(
         "--max_new_tokens",

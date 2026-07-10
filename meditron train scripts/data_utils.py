@@ -50,7 +50,7 @@ from typing import Optional
 
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
-from config import LanguageConfig, SUPPORTED_LANGUAGES
+from config import LanguageConfig, SOURCE_DATASETS, SUPPORTED_LANGUAGES
 
 logger = logging.getLogger(__name__)
 
@@ -115,12 +115,13 @@ def validate_required_columns(dataset: DatasetDict, lang_code: str) -> None:
 
 class MultilingualDatasetBuilder:
     """
-    Load, validate, and optionally augment per-variant SRH datasets.
+    Load, validate, combine, and optionally augment SRH datasets.
 
     Resolution order:
-    1. `save_to_disk()` mirror under `<data_root>/<dataset_id>`
-    2. local shard tree under `<data_root>/<language_code>/<dataset_id>/`
-    3. Hugging Face Hub repo referenced by `dataset_repo`
+    1. `save_to_disk()` mirror under `<data_root>/<adapter_or_dataset_id>`
+    2. combined source leaves for aggregate targets such as `eng` and `swa`
+    3. local shard tree under `<data_root>/<language_code>/<dataset_id>/`
+    4. Hugging Face Hub repo referenced by `dataset_repo`
     """
 
     def __init__(
@@ -146,7 +147,7 @@ class MultilingualDatasetBuilder:
         augment: bool = True,
     ) -> DatasetDict:
         """
-        Load one dataset leaf such as `eng_uga` or `swa_ken`.
+        Load one adapter target such as `eng`, `swa`, or `lug_uga`.
 
         The returned dataset is normalized so downstream code can always ask for
         `train`, `dev`, and `test` regardless of whether the source used legacy
@@ -181,7 +182,7 @@ class MultilingualDatasetBuilder:
 
     def _load_dataset(self, lang_code: str, lang_cfg: LanguageConfig) -> DatasetDict:
         """
-        Resolve a dataset leaf from local caches first, then from the Hub.
+        Resolve a dataset or aggregate target from local caches first.
 
         This keeps repeated experiments cheap while still allowing direct Hub
         training when no local mirror exists.
@@ -189,6 +190,9 @@ class MultilingualDatasetBuilder:
         saved_to_disk = self._load_saved_to_disk(lang_code)
         if saved_to_disk is not None:
             return saved_to_disk
+
+        if lang_cfg.source_datasets:
+            return self._load_combined_sources(lang_code, lang_cfg)
 
         local_shards = self._load_local_shards(lang_cfg)
         if local_shards is not None:
@@ -208,6 +212,72 @@ class MultilingualDatasetBuilder:
             f"Could not locate dataset '{lang_code}'. Expected local save_to_disk data, "
             f"local shard files, or a Hub dataset repo. Last expected location: {expected}"
         )
+
+    def _load_combined_sources(
+        self,
+        lang_code: str,
+        lang_cfg: LanguageConfig,
+    ) -> DatasetDict:
+        """Load and concatenate the source leaves for a combined adapter target."""
+
+        split_parts: dict[str, list[Dataset]] = {split: [] for split in CANONICAL_SPLITS}
+        for source_id in lang_cfg.source_datasets:
+            source_cfg = SOURCE_DATASETS[source_id]
+            source_dataset = self._load_dataset(source_id, source_cfg)
+            source_dataset = normalize_dataset_splits(source_dataset)
+            validate_required_columns(source_dataset, source_id)
+
+            for split_name in CANONICAL_SPLITS:
+                split_ds = get_split(source_dataset, split_name)
+                if split_ds is not None and len(split_ds) > 0:
+                    split_parts[split_name].append(split_ds)
+                    logger.info(
+                        "[%s] Loaded %s %s samples from source leaf %s.",
+                        lang_code,
+                        len(split_ds),
+                        split_name,
+                        source_id,
+                    )
+
+        combined = {}
+        for split_name, parts in split_parts.items():
+            if not parts:
+                continue
+
+            common_columns = set(parts[0].column_names)
+            for part in parts[1:]:
+                common_columns &= set(part.column_names)
+
+            required = {"input", "output"}
+            if not required.issubset(common_columns):
+                missing = required - common_columns
+                raise ValueError(
+                    f"Combined split '{split_name}' for '{lang_code}' is missing "
+                    f"shared required columns: {sorted(missing)}"
+                )
+
+            ordered_columns = ["input", "output"]
+            if "label" in common_columns:
+                ordered_columns.append("label")
+            aligned_parts = [part.select_columns(ordered_columns) for part in parts]
+            combined[split_name] = concatenate_datasets(aligned_parts).shuffle(
+                seed=self.seed
+            )
+            logger.info(
+                "[%s] Combined %s source leaves into %s %s samples.",
+                lang_code,
+                len(parts),
+                len(combined[split_name]),
+                split_name,
+            )
+
+        if not combined:
+            raise ValueError(
+                f"No source splits found for combined dataset '{lang_code}' "
+                f"from {list(lang_cfg.source_datasets)}"
+            )
+
+        return DatasetDict(combined)
 
     def _load_saved_to_disk(self, lang_code: str) -> Optional[DatasetDict]:
         """Load a previously mirrored `DatasetDict.save_to_disk()` dataset."""
