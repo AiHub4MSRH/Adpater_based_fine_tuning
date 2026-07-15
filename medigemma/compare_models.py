@@ -29,6 +29,7 @@ from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndByte
 from config import SUPPORTED_LANGUAGES, TrainingConfig, expand_language_selection
 from data_utils import MultilingualDatasetBuilder, get_split
 from evaluation import resolve_adapter_path
+from prompt_utils import build_hashie_messages
 
 logging.basicConfig(
     level=logging.INFO,
@@ -202,18 +203,12 @@ def load_model_and_processor(
 
 
 def build_messages(prompt: str, language_name: str) -> list[dict[str, str]]:
-    """Build the same evaluation prompt shape used in the repo evaluator."""
+    """Build the same prompt shape used during training and evaluation."""
 
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are a helpful sexual and reproductive health assistant. "
-                f"Answer in {language_name}."
-            ),
-        },
-        {"role": "user", "content": prompt},
-    ]
+    return build_hashie_messages(
+        user_text=prompt,
+        language_name=language_name,
+    )
 
 
 def generate_response(

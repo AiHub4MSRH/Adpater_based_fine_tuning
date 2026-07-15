@@ -387,13 +387,14 @@ class MultilingualDatasetBuilder:
         original_size: int,
     ) -> Dataset:
         """
-        Three-stage augmentation for low-resource dataset leaves:
+        Language-safe augmentation for low-resource dataset leaves:
         1. Repeat tiny datasets
-        2. Add a capped donor sample from a configured related leaf
-        3. Add a small synthetic SRH template set
+        2. Add a capped donor sample only when it uses the same language code
+        3. Add English synthetic SRH templates only for English adapters
 
-        This remains intentionally conservative. The synthetic stage is meant to
-        stabilize training on tiny leaves, not replace real SRH data.
+        Cross-language English augmentation polluted non-English adapters during
+        generation, so this path avoids donor/synthetic examples unless their
+        language matches the target.
         """
 
         augmented_parts = [dataset]
@@ -406,26 +407,40 @@ class MultilingualDatasetBuilder:
         donor_code = lang_cfg.transfer_from
         if donor_code and donor_code in SUPPORTED_LANGUAGES:
             donor_cfg = SUPPORTED_LANGUAGES[donor_code]
-            try:
-                donor_ds = self.load_language(donor_code, donor_cfg, augment=False)["train"]
-                n_donor = min(len(donor_ds), max(original_size // 2, 200))
-                donor_sample = donor_ds.shuffle(seed=self.seed).select(range(n_donor))
+            if donor_cfg.language_code != lang_cfg.language_code:
                 logger.info(
-                    "[%s] Adding %s donor samples from %s",
-                    lang_code,
-                    n_donor,
-                    donor_code,
-                )
-                augmented_parts.append(donor_sample)
-            except Exception as exc:
-                logger.warning(
-                    "[%s] Could not load donor dataset '%s': %s",
+                    "[%s] Skipping donor samples from %s because language codes differ (%s vs %s).",
                     lang_code,
                     donor_code,
-                    exc,
+                    lang_cfg.language_code,
+                    donor_cfg.language_code,
                 )
+            else:
+                try:
+                    donor_ds = self.load_language(donor_code, donor_cfg, augment=False)["train"]
+                    n_donor = min(len(donor_ds), max(original_size // 2, 200))
+                    donor_sample = donor_ds.shuffle(seed=self.seed).select(range(n_donor))
+                    logger.info(
+                        "[%s] Adding %s donor samples from %s",
+                        lang_code,
+                        n_donor,
+                        donor_code,
+                    )
+                    augmented_parts.append(donor_sample)
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] Could not load donor dataset '%s': %s",
+                        lang_code,
+                        donor_code,
+                        exc,
+                    )
 
-        synthetic = self._generate_synthetic_samples(lang_code, n=min(200, original_size))
+        synthetic = []
+        if lang_cfg.language_code == "eng":
+            synthetic = self._generate_synthetic_samples(lang_code, n=min(200, original_size))
+        else:
+            logger.info("[%s] Skipping English synthetic templates for non-English adapter.", lang_code)
+
         if synthetic:
             augmented_parts.append(Dataset.from_list(synthetic))
             logger.info("[%s] Added %s synthetic samples", lang_code, len(synthetic))

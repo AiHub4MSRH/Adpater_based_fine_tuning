@@ -323,6 +323,7 @@ class MultilingualEvaluator:
 
         predictions   = []
         references    = []
+        sample_predictions = []
         invalid_count = 0
 
         for example in test_ds:
@@ -342,6 +343,14 @@ class MultilingualEvaluator:
 
             predictions.append(prediction)
             references.append(reference)
+            if len(sample_predictions) < 5:
+                sample_predictions.append(
+                    {
+                        "input": prompt,
+                        "reference": reference,
+                        "prediction": prediction,
+                    }
+                )
 
         exact_matches = [
             _exact_match(pred, ref)
@@ -366,6 +375,7 @@ class MultilingualEvaluator:
             "rouge_l":       round(sum(rouge_scores)  / n, 4),
             "invalid_rate":  round(invalid_count       / n, 4),
             "resource_level": lang_cfg.resource_level if lang_cfg else "unknown",
+            "sample_predictions": sample_predictions,
         }
 
         if "label" in test_ds.column_names:

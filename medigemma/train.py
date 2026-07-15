@@ -26,6 +26,7 @@ import inspect
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -36,7 +37,6 @@ from transformers import (
     AutoModelForImageTextToText,
     AutoProcessor,
     BitsAndBytesConfig,
-    DataCollatorForLanguageModeling,
 )
 from transformers import EarlyStoppingCallback
 from trl import SFTConfig, SFTTrainer
@@ -49,6 +49,7 @@ from config import (
 )
 from data_utils import MultilingualDatasetBuilder, get_split
 from evaluation import MultilingualEvaluator, resolve_adapter_path
+from prompt_utils import build_hashie_messages
 
 logging.basicConfig(
     level=logging.INFO,
@@ -145,8 +146,80 @@ def build_lora_config(lang_cfg: LanguageConfig) -> LoraConfig:
             "up_proj",
             "down_proj",
         ],
-        modules_to_save=["lm_head", "embed_tokens"],
     )
+
+
+def build_completion_collator(tokenizer):
+    """
+    Pad pre-tokenized causal-LM batches while preserving assistant-only labels.
+
+    The training map function sets labels to -100 for system/user tokens, so the
+    loss is computed only on the assistant response.
+    """
+
+    def collate(features: list[dict]) -> dict:
+        labels = [feature["labels"] for feature in features]
+        model_features = [
+            {key: value for key, value in feature.items() if key != "labels"}
+            for feature in features
+        ]
+        batch = tokenizer.pad(model_features, padding=True, return_tensors="pt")
+
+        max_length = batch["input_ids"].shape[1]
+        padded_labels = []
+        for label in labels:
+            pad_len = max_length - len(label)
+            padding = [-100] * pad_len
+            if tokenizer.padding_side == "left":
+                padded_labels.append(padding + label)
+            else:
+                padded_labels.append(label + padding)
+
+        batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
+        return batch
+
+    return collate
+
+
+def resolve_peft_checkpoint_path(checkpoint_dir: Optional[str], language: str) -> Optional[Path]:
+    """Find the PEFT adapter files inside a Trainer checkpoint directory."""
+
+    if not checkpoint_dir:
+        return None
+
+    root = Path(checkpoint_dir)
+    candidates = (root, root / language, root / "default")
+    for candidate in candidates:
+        if (candidate / "adapter_config.json").exists():
+            return candidate
+    return None
+
+
+def save_best_or_current_adapter(model, adapter_output_dir: Path, best_checkpoint: Optional[str], language: str) -> None:
+    """Export the best PEFT checkpoint when early stopping selected one."""
+
+    best_adapter_path = resolve_peft_checkpoint_path(best_checkpoint, language)
+    if best_adapter_path is not None:
+        logger.info("Saving best adapter checkpoint from %s", best_adapter_path)
+        adapter_output_dir.mkdir(parents=True, exist_ok=True)
+        for filename in (
+            "adapter_config.json",
+            "adapter_model.safetensors",
+            "adapter_model.bin",
+            "README.md",
+        ):
+            source = best_adapter_path / filename
+            if source.exists():
+                shutil.copy2(source, adapter_output_dir / filename)
+        return
+
+    if best_checkpoint:
+        logger.warning(
+            "Best checkpoint was recorded at %s, but no PEFT adapter files were found there. "
+            "Saving current adapter weights instead.",
+            best_checkpoint,
+        )
+    model.save_pretrained(str(adapter_output_dir))
 
 
 def build_sft_config(
@@ -261,7 +334,7 @@ def train_language_adapter(
     run_name = f"train_{language}"
 
     base_model, processor = load_base_model(cfg)
-    model = get_peft_model(base_model, build_lora_config(lang_cfg), adapter_name=language)
+    model = get_peft_model(base_model, build_lora_config(lang_cfg))
     model.print_trainable_parameters()
 
     train_ds = get_split(dataset, "train")
@@ -271,32 +344,30 @@ def train_language_adapter(
         logger.warning("Empty training set for %s; skipping.", language)
         return str(adapter_output_dir)
 
-    # Gemma-style supervised fine-tuning expects conversational turns. We map
-    # the dataset's `input` / `output` columns into a simple SRH chat exchange.
+    # Gemma-style supervised fine-tuning expects conversational turns. We keep
+    # both the full conversation and the assistant prefix so tokenization can
+    # mask system/user tokens out of the training loss.
     def format_sample(example):
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    """ 
-                    You are Hashie, a muliti-lingual medical assistant with expertise in sexual and reproductive health (SRH).
-                    You are knowledgeable, supportive, and approachable, capable of communicating with empathy and clarity.
-                    You can explain sexually transmitted infections (STIs) and related health topics in simple, everyday language suitable for young adults and the general public.
-                    When interacting with medical professionals, you can also provide detailed, evidence-based explanations and use precise clinical terminology when appropriate.
-                    Your goal is to ensure that all users — regardless of their medical background — receive accurate, respectful, and easy-to-understand information about sexual and reproductive health.
-                    """
-                    f"Answer in {lang_cfg.language_name}."
-                ),
-            },
-            {"role": "user", "content": example["input"]},
-            {"role": "assistant", "content": example["output"]},
-        ]
+        prompt_messages = build_hashie_messages(
+            user_text=example["input"],
+            language_name=lang_cfg.language_name,
+        )
+        full_messages = build_hashie_messages(
+            user_text=example["input"],
+            language_name=lang_cfg.language_name,
+            assistant_text=example["output"],
+        )
+        prompt_text = processor.tokenizer.apply_chat_template(
+            prompt_messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
         text = processor.tokenizer.apply_chat_template(
-            messages,
+            full_messages,
             tokenize=False,
             add_generation_prompt=False,
         )
-        return {"text": text}
+        return {"text": text, "prompt_text": prompt_text}
 
     train_text = train_ds.map(format_sample, remove_columns=train_ds.column_names)
     eval_text = None
@@ -318,11 +389,31 @@ def train_language_adapter(
             padding=False,
             return_attention_mask=True,
         )
+        prompt_tokenized = processor.tokenizer(
+            batch["prompt_text"],
+            truncation=True,
+            max_length=cfg.max_seq_length,
+            padding=False,
+            return_attention_mask=False,
+        )
 
         if "token_type_ids" not in tokenized:
             tokenized["token_type_ids"] = [
                 [0] * len(input_ids) for input_ids in tokenized["input_ids"]
             ]
+
+        labels = []
+        for input_ids, prompt_ids in zip(
+            tokenized["input_ids"],
+            prompt_tokenized["input_ids"],
+        ):
+            sample_labels = list(input_ids)
+            prompt_len = min(len(prompt_ids), len(sample_labels))
+            if prompt_len >= len(sample_labels):
+                prompt_len = max(len(sample_labels) - 1, 0)
+            sample_labels[:prompt_len] = [-100] * prompt_len
+            labels.append(sample_labels)
+        tokenized["labels"] = labels
 
         return tokenized
 
@@ -356,10 +447,7 @@ def train_language_adapter(
             lang_cfg.early_stopping_threshold,
         )
 
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=processor.tokenizer,
-        mlm=False,
-    )
+    data_collator = build_completion_collator(processor.tokenizer)
 
     trainer = SFTTrainer(
         model=model,
@@ -374,7 +462,12 @@ def train_language_adapter(
     logger.info("Training %s adapter with %s train samples", language, len(train_tokens))
     trainer.train()
 
-    model.save_pretrained(str(adapter_output_dir))
+    save_best_or_current_adapter(
+        model=model,
+        adapter_output_dir=adapter_output_dir,
+        best_checkpoint=trainer.state.best_model_checkpoint,
+        language=language,
+    )
     processor.save_pretrained(str(adapter_output_dir))
 
     metadata = {

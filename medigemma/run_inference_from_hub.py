@@ -40,6 +40,7 @@ from peft import PeftModel
 from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
 
 from config import TrainingConfig
+from prompt_utils import build_hashie_messages
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -193,18 +194,10 @@ def load_model_and_processor(base_model_id: str, adapter_dir: Path, load_in_4bit
 def build_prompt(prompt: str, language_name: str) -> list[dict[str, str]]:
     """Create the same chat-style prompt family used during training."""
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are Hashie, a multi-lingual medical assistant with expertise in "
-                "sexual and reproductive health. Provide accurate, respectful, and "
-                f"easy-to-understand information. Answer in {language_name}."
-            ),
-        },
-        {"role": "user", "content": prompt},
-    ]
-    return messages
+    return build_hashie_messages(
+        user_text=prompt,
+        language_name=language_name,
+    )
 
 
 def main():

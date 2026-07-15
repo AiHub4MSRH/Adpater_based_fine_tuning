@@ -530,6 +530,14 @@ python3 'meditron train scripts/run_inference_from_hub.py' \
 - Keep `./adapters/medigemma` and `./adapters/meditron` separate.
 - Use `--precision full_lora` for final-quality runs.
 - Use `--precision qlora` only when full-precision LoRA does not fit.
+- LoRA training updates adapter weights only. The scripts no longer train or
+  save `lm_head` / `embed_tokens`, which keeps low-resource adapters from
+  overfitting billions of extra parameters.
+- Training loss is assistant-only: system and user prompt tokens are masked out
+  so the model is optimized for answer generation rather than prompt copying.
+- Low-resource augmentation is language-safe. English donor and synthetic
+  examples are not mixed into non-English adapters unless a same-language donor
+  is available.
 - Training uses dev-set early stopping when a `dev` split is available. The
   scripts evaluate and save every 50 steps, track `eval_loss`, reload the best
   checkpoint at the end, and stop after the language-specific patience is

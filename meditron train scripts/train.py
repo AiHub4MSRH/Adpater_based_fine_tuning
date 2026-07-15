@@ -27,6 +27,7 @@ import inspect
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -37,7 +38,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
-    DataCollatorForLanguageModeling,
     EarlyStoppingCallback,
 )
 from trl import SFTConfig, SFTTrainer
@@ -176,9 +176,80 @@ def build_lora_config(lang_cfg: LanguageConfig) -> LoraConfig:
             "up_proj",
             "down_proj",
         ],
-        # embed_tokens and lm_head are saved so generation is self-contained.
-        modules_to_save=["lm_head", "embed_tokens"],
     )
+
+
+def build_completion_collator(tokenizer):
+    """
+    Pad pre-tokenized causal-LM batches while preserving assistant-only labels.
+
+    The training map function sets labels to -100 for system/user tokens, so the
+    loss is computed only on the assistant response.
+    """
+
+    def collate(features: list[dict]) -> dict:
+        labels = [feature["labels"] for feature in features]
+        model_features = [
+            {key: value for key, value in feature.items() if key != "labels"}
+            for feature in features
+        ]
+        batch = tokenizer.pad(model_features, padding=True, return_tensors="pt")
+
+        max_length = batch["input_ids"].shape[1]
+        padded_labels = []
+        for label in labels:
+            pad_len = max_length - len(label)
+            padding = [-100] * pad_len
+            if tokenizer.padding_side == "left":
+                padded_labels.append(padding + label)
+            else:
+                padded_labels.append(label + padding)
+
+        batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
+        return batch
+
+    return collate
+
+
+def resolve_peft_checkpoint_path(checkpoint_dir: Optional[str], language: str) -> Optional[Path]:
+    """Find the PEFT adapter files inside a Trainer checkpoint directory."""
+
+    if not checkpoint_dir:
+        return None
+
+    root = Path(checkpoint_dir)
+    candidates = (root, root / language, root / "default")
+    for candidate in candidates:
+        if (candidate / "adapter_config.json").exists():
+            return candidate
+    return None
+
+
+def save_best_or_current_adapter(model, adapter_output_dir: Path, best_checkpoint: Optional[str], language: str) -> None:
+    """Export the best PEFT checkpoint when early stopping selected one."""
+
+    best_adapter_path = resolve_peft_checkpoint_path(best_checkpoint, language)
+    if best_adapter_path is not None:
+        logger.info("Saving best adapter checkpoint from %s", best_adapter_path)
+        adapter_output_dir.mkdir(parents=True, exist_ok=True)
+        for filename in (
+            "adapter_config.json",
+            "adapter_model.safetensors",
+            "adapter_model.bin",
+            "README.md",
+        ):
+            source = best_adapter_path / filename
+            if source.exists():
+                shutil.copy2(source, adapter_output_dir / filename)
+        return
+
+    if best_checkpoint:
+        logger.warning(
+            "Best checkpoint was recorded at %s, but no PEFT adapter files were found there. "
+            "Saving current adapter weights instead.",
+            best_checkpoint,
+        )
+    model.save_pretrained(str(adapter_output_dir))
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +363,11 @@ def make_format_fn(_lang_cfg: LanguageConfig, _tokenizer: AutoTokenizer):
             user_text=example["input"],
             assistant_text=example["output"],
         )
-        return {"text": text}
+        prompt_text = render_meditron_chat(
+            user_text=example["input"],
+            add_generation_prompt=True,
+        )
+        return {"text": text, "prompt_text": prompt_text}
 
     return format_sample
 
@@ -324,7 +399,7 @@ def train_language_adapter(
     # Load model + tokenizer
     # -----------------------------------------------------------------------
     base_model, tokenizer = load_base_model(cfg)
-    model = get_peft_model(base_model, build_lora_config(lang_cfg), adapter_name=language)
+    model = get_peft_model(base_model, build_lora_config(lang_cfg))
     model.print_trainable_parameters()
 
     # -----------------------------------------------------------------------
@@ -365,6 +440,13 @@ def train_language_adapter(
             padding=False,
             return_attention_mask=True,
         )
+        prompt_tokenized = tokenizer(
+            batch["prompt_text"],
+            truncation=True,
+            max_length=cfg.max_seq_length,
+            padding=False,
+            return_attention_mask=False,
+        )
 
         # meditron-7b does not emit token_type_ids; add zeros so the collator
         # does not complain if any downstream code checks for this field.
@@ -372,6 +454,19 @@ def train_language_adapter(
             tokenized["token_type_ids"] = [
                 [0] * len(ids) for ids in tokenized["input_ids"]
             ]
+
+        labels = []
+        for input_ids, prompt_ids in zip(
+            tokenized["input_ids"],
+            prompt_tokenized["input_ids"],
+        ):
+            sample_labels = list(input_ids)
+            prompt_len = min(len(prompt_ids), len(sample_labels))
+            if prompt_len >= len(sample_labels):
+                prompt_len = max(len(sample_labels) - 1, 0)
+            sample_labels[:prompt_len] = [-100] * prompt_len
+            labels.append(sample_labels)
+        tokenized["labels"] = labels
 
         return tokenized
 
@@ -413,10 +508,7 @@ def train_language_adapter(
             lang_cfg.early_stopping_threshold,
         )
 
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,
-    )
+    data_collator = build_completion_collator(tokenizer)
 
     trainer = SFTTrainer(
         model=model,
@@ -436,7 +528,12 @@ def train_language_adapter(
     # -----------------------------------------------------------------------
     # Save adapter + tokenizer + metadata
     # -----------------------------------------------------------------------
-    model.save_pretrained(str(adapter_output_dir))
+    save_best_or_current_adapter(
+        model=model,
+        adapter_output_dir=adapter_output_dir,
+        best_checkpoint=trainer.state.best_model_checkpoint,
+        language=language,
+    )
     tokenizer.save_pretrained(str(adapter_output_dir))
 
     metadata = {
