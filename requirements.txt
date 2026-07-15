@@ -1,14 +1,14 @@
 # Core ML / fine-tuning
 torch>=2.2.0
-transformers>=4.47.0
-peft>=0.14.0
+transformers>=5.9.0
+peft>=0.19.1
 trl>=0.12.0
-bitsandbytes>=0.43.0
-accelerate>=0.30.0
+bitsandbytes>=0.49.2
+accelerate>=1.13.0
 
 # Data handling
 datasets>=2.18.0
-huggingface_hub>=0.22.0
+huggingface_hub>=1.17.0
 
 # Evaluation
 rouge-score>=0.1.2

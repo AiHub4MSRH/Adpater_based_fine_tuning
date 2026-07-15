@@ -171,6 +171,7 @@ Local data may also be stored as source leaves such as `data/eng_uga/` and
 | Mirror data | `python3 medigemma/prepare_data.py` | `python3 'meditron train scripts/prepare_data.py'` |
 | Train or eval | `python3 medigemma/train.py` | `python3 'meditron train scripts/train.py'` |
 | Compare baseline vs adapter | `python3 medigemma/compare_models.py` | `python3 'meditron train scripts/compare_models.py'` |
+| Evaluate external HF adapter | `python3 medigemma/evaluate_external_adapter.py` | N/A |
 | LLM judge comparison CSV | `python3 judge_comparison_with_openai.py` | `python3 judge_comparison_with_openai.py` |
 | Push adapters to Hub | `python3 medigemma/push_adapters_to_hub.py` | `python3 'meditron train scripts/push_adapters_to_hub.py'` |
 | Run Hub inference | `python3 medigemma/run_inference_from_hub.py` | `python3 'meditron train scripts/run_inference_from_hub.py'` |
@@ -446,6 +447,116 @@ Each comparison writes:
 - `adapter_baseline_comparison.csv`
 - `baseline_eval_report.json`
 - `adapter_comparison_report.json`
+
+### 5.1 Evaluate Darius / Brainiac HF Adapters With Our Pipeline
+
+Use this to evaluate an external PEFT adapter on the same data splits and
+automatic metrics we use for our own MedGemma comparisons. The row-level CSV is
+compatible with `judge_comparison_with_openai.py`: the external model is written
+as `adapter_prediction`.
+
+Start with `gen7454`, because it is the Brainiac adapter trained across all
+eight challenge subsets. Use `--load_in_4bit` for the first run unless you
+explicitly want full-weight loading.
+
+If your virtual environment was created before this external-adapter evaluator
+was added, upgrade the ML stack first:
+
+```bash
+pip install -U -r requirements.txt
+```
+
+Smoke test across all supported adapter targets:
+
+```bash
+python3 medigemma/evaluate_external_adapter.py \
+  --data_root ./data \
+  --languages aka amh eng lug swa \
+  --adapter_repo DariusTheGeek/mhqa-itu-adapters \
+  --adapter_subfolder gen7454 \
+  --adapter_base_model google/gemma-4-31B-it \
+  --candidate_name darius_gen7454 \
+  --prompt_style hashie \
+  --load_in_4bit \
+  --max_eval_samples 20 \
+  --output_dir ./reports
+```
+
+Full evaluation across the available test split:
+
+```bash
+python3 medigemma/evaluate_external_adapter.py \
+  --data_root ./data \
+  --languages aka amh eng lug swa \
+  --adapter_repo DariusTheGeek/mhqa-itu-adapters \
+  --adapter_subfolder gen7454 \
+  --adapter_base_model google/gemma-4-31B-it \
+  --candidate_name darius_gen7454 \
+  --prompt_style hashie \
+  --load_in_4bit \
+  --max_eval_samples 100000 \
+  --output_dir ./reports
+```
+
+This writes:
+
+- `reports/darius_gen7454_test_comparison.csv`
+- `reports/darius_gen7454_test_comparison_report.json`
+
+The default `--prompt_style hashie` is the fairest apples-to-apples comparison
+against our adapters because it uses the same Hashie evaluation prompt. To test
+the external adapter closer to its original prompt style, use:
+
+```bash
+python3 medigemma/evaluate_external_adapter.py \
+  --data_root ./data \
+  --languages aka amh eng lug swa \
+  --adapter_repo DariusTheGeek/mhqa-itu-adapters \
+  --adapter_subfolder gen7454 \
+  --adapter_base_model google/gemma-4-31B-it \
+  --candidate_name darius_gen7454_native_prompt \
+  --prompt_style darius \
+  --use_source_leaves \
+  --load_in_4bit \
+  --max_eval_samples 100000 \
+  --output_dir ./reports
+```
+
+If your local `./data` directory only contains combined `eng/` and `swa/`
+folders, the script will fall back to those combined targets. If you want
+source-leaf reporting for `eng_eth`, `eng_gha`, `eng_ken`, `eng_uga`,
+`swa_ken`, and `swa_uga`, provide a local source-leaf mirror or add
+`--dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET`.
+
+Run the OpenAI judge on the external-adapter comparison:
+
+```bash
+python3 judge_comparison_with_openai.py \
+  --comparison_csv ./reports/darius_gen7454_test_comparison.csv \
+  --output_csv ./reports/darius_gen7454_test_llm_judged.csv \
+  --report_json ./reports/darius_gen7454_test_llm_judge_report.json \
+  --batch_size 8 \
+  --concurrency 4
+```
+
+If you run with `--skip_baseline`, judge only the external adapter column:
+
+```bash
+python3 judge_comparison_with_openai.py \
+  --comparison_csv ./reports/darius_gen7454_test_comparison.csv \
+  --prediction_columns adapter_prediction \
+  --output_csv ./reports/darius_gen7454_test_llm_judged.csv \
+  --report_json ./reports/darius_gen7454_test_llm_judge_report.json \
+  --batch_size 8 \
+  --concurrency 4
+```
+
+The other published Brainiac adapters are narrower:
+
+- `mg_2226` uses `google/medgemma-27b-text-it` and was trained for the Ghana
+  generation subsets.
+- `raft_r1` expects a merged `gen7454` base, so do not use it first unless that
+  merged base is available locally.
 
 ## Step 6: Push Adapters to Hugging Face
 
