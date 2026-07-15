@@ -41,6 +41,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
 DARIUS_GENERATION_SOURCES = {"aka_gha", "amh_eth", "eng_gha", "swa_uga"}
 DARIUS_DIRECT_RETRIEVAL_SOURCES = {"eng_ken", "swa_ken", "lug_uga"}
