@@ -588,6 +588,12 @@ python3 judge_comparison_with_openai.py \
   --concurrency 4
 ```
 
+The judge uses rubric versioning and a local cache. When the rubric changes,
+new cache keys are used automatically. The current rubric also applies
+deterministic metric caps: highly repetitive, wrong-script, code-switched, or
+runaway-long generations cannot receive high `language_quality`, `helpfulness`,
+or `overall` scores even if the LLM judge finds some correct clinical fragments.
+
 For a small smoke test:
 
 ```bash

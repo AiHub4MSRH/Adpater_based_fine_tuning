@@ -27,7 +27,7 @@ from typing import Any
 import openai
 from openai import AsyncOpenAI
 
-RUBRIC_VERSION = "srh-judge-v1"
+RUBRIC_VERSION = "srh-judge-v2"
 DEFAULT_MODEL = os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o-mini")
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_CONCURRENCY = 4
@@ -55,6 +55,12 @@ Evaluate clinical meaning, not exact wording. A prediction can be good even if
 it paraphrases the reference. Penalize hallucinated medical facts, unsafe
 advice, missing key clinical facts, repetition, irrelevant content, and language
 mixing that would confuse the user.
+
+You may also receive automatic quality signals such as script match, Latin
+leakage, repetition rate, length ratio, and a quality flag. Use these signals
+as evidence of generation quality. If an answer is highly repetitive,
+wrong-script, or runaway-long, language_quality, helpfulness, and overall should
+be low even when some clinical fragments are present.
 
 Return ONLY a JSON object with this exact top-level shape:
 {
@@ -137,6 +143,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Ignore and do not update the local judge cache.",
     )
+    parser.add_argument(
+        "--disable_metric_caps",
+        action="store_true",
+        help=(
+            "Do not cap judge scores using deterministic generation-quality "
+            "metrics from the comparison CSV."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -203,6 +217,21 @@ def candidate_prefix(column: str) -> str:
     return column.removesuffix("_prediction")
 
 
+def parse_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value in ("", None):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "1.0", "true", "yes", "y"}
+
+
 def chunk_list(items: list[dict[str, Any]], chunk_size: int):
     for start in range(0, len(items), chunk_size):
         yield items[start : start + chunk_size]
@@ -255,6 +284,20 @@ def build_items(
                 continue
 
             candidate = candidate_prefix(column)
+            metric_prefix = candidate
+            metrics = {
+                "char_3gram_f1": parse_float(row.get(f"{metric_prefix}_char_3gram_f1")),
+                "script_match_ratio": parse_float(
+                    row.get(f"{metric_prefix}_script_match_ratio"),
+                    default=1.0,
+                ),
+                "latin_leak_ratio": parse_float(row.get(f"{metric_prefix}_latin_leak_ratio")),
+                "repetition_4gram_rate": parse_float(
+                    row.get(f"{metric_prefix}_repetition_4gram_rate")
+                ),
+                "length_ratio": parse_float(row.get(f"{metric_prefix}_length_ratio"), default=1.0),
+                "quality_flag": parse_bool(row.get(f"{metric_prefix}_quality_flag")),
+            }
             items.append(
                 {
                     "id": f"{row_index}:{candidate}",
@@ -266,6 +309,7 @@ def build_items(
                     "question": question,
                     "reference": reference,
                     "prediction": prediction,
+                    "metrics": metrics,
                 }
             )
 
@@ -280,6 +324,7 @@ def build_user_message(items: list[dict[str, Any]]) -> str:
             "question": item["question"],
             "reference_answer": item["reference"],
             "prediction_to_judge": item["prediction"],
+            "automatic_quality_signals": item.get("metrics", {}),
         }
         for item in items
     ]
@@ -313,6 +358,55 @@ def normalize_judged_item(raw: dict[str, Any], fallback_id: str) -> dict[str, An
 
     reason = str(raw.get("reason") or "").strip()
     result["reason"] = reason[:600]
+    result["metric_caps_applied"] = False
+    result["metric_cap_reasons"] = []
+    return result
+
+
+def cap_score(result: dict[str, Any], field: str, maximum: int, reasons: list[str]) -> None:
+    if result[field] > maximum:
+        result[field] = maximum
+        result["metric_caps_applied"] = True
+    result["metric_cap_reasons"].extend(reasons)
+
+
+def apply_metric_caps(result: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    """
+    Bound user-facing scores using deterministic generation-quality checks.
+
+    The LLM judge can occasionally over-reward a long answer that contains some
+    correct fragments despite severe repetition or language leakage. These caps
+    keep the aggregate report honest for deployable assistant quality.
+    """
+
+    metrics = item.get("metrics", {})
+    reasons: list[str] = []
+
+    if metrics.get("quality_flag"):
+        reasons.append("quality_flag")
+    if metrics.get("repetition_4gram_rate", 0.0) > 0.2:
+        reasons.append("high_repetition")
+    if metrics.get("length_ratio", 1.0) > 4.0:
+        reasons.append("runaway_length")
+    if metrics.get("script_match_ratio", 1.0) < 0.85:
+        reasons.append("low_target_script_match")
+    if metrics.get("latin_leak_ratio", 0.0) > 0.15:
+        reasons.append("latin_code_switch_leakage")
+
+    if not reasons:
+        return result
+
+    if "high_repetition" in reasons or "runaway_length" in reasons or "quality_flag" in reasons:
+        cap_score(result, "language_quality", 2, [])
+        cap_score(result, "helpfulness", 2, [])
+        cap_score(result, "overall", 2, [])
+
+    if "low_target_script_match" in reasons or "latin_code_switch_leakage" in reasons:
+        cap_score(result, "language_quality", 2, [])
+        cap_score(result, "helpfulness", 3, [])
+        cap_score(result, "overall", 3, [])
+
+    result["metric_cap_reasons"] = sorted(set(result["metric_cap_reasons"] + reasons))
     return result
 
 
@@ -362,8 +456,10 @@ async def call_judge_batch(
     semaphore: asyncio.Semaphore,
     max_tokens: int,
     retries: int,
+    apply_caps: bool,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
     expected_ids = [item["id"] for item in batch]
+    items_by_id = {item["id"]: item for item in batch}
 
     async with semaphore:
         for attempt in range(1, retries + 1):
@@ -386,7 +482,13 @@ async def call_judge_batch(
                 if not content:
                     raise ValueError("OpenAI response content was empty.")
 
-                return parse_judge_response(content, expected_ids), usage
+                parsed_results = parse_judge_response(content, expected_ids)
+                if apply_caps:
+                    parsed_results = {
+                        item_id: apply_metric_caps(result, items_by_id[item_id])
+                        for item_id, result in parsed_results.items()
+                    }
+                return parsed_results, usage
             except (
                 openai.APIError,
                 json.JSONDecodeError,
@@ -421,6 +523,7 @@ async def judge_items(
     concurrency: int,
     max_tokens: int,
     retries: int,
+    apply_caps: bool,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
     client = AsyncOpenAI(api_key=api_key)
     results: dict[str, dict[str, Any]] = {}
@@ -454,6 +557,7 @@ async def judge_items(
             semaphore=semaphore,
             max_tokens=max_tokens,
             retries=retries,
+            apply_caps=apply_caps,
         )
         for index, batch in enumerate(batches)
     ]
@@ -497,6 +601,12 @@ def add_judge_scores_to_rows(
         for field in BOOL_FIELDS:
             row[f"{prefix}_{field}"] = str(judge[field]).lower()
         row[f"{prefix}_reason"] = judge["reason"]
+        row[f"{prefix}_metric_caps_applied"] = str(
+            judge.get("metric_caps_applied", False)
+        ).lower()
+        row[f"{prefix}_metric_cap_reasons"] = ";".join(
+            judge.get("metric_cap_reasons", [])
+        )
 
 
 def aggregate_report(
@@ -536,6 +646,10 @@ def aggregate_report(
                 sum(1 for item in judged if item["harmful_advice"]) / n,
                 4,
             ),
+            "metric_cap_rate": round(
+                sum(1 for item in judged if item.get("metric_caps_applied")) / n,
+                4,
+            ),
         }
 
     return {
@@ -558,6 +672,8 @@ def judge_fieldnames(base_fieldnames: list[str], candidates: list[str]) -> list[
         for field in BOOL_FIELDS:
             fields.append(f"{prefix}_{field}")
         fields.append(f"{prefix}_reason")
+        fields.append(f"{prefix}_metric_caps_applied")
+        fields.append(f"{prefix}_metric_cap_reasons")
     return list(dict.fromkeys(fields))
 
 
@@ -601,6 +717,7 @@ async def async_main() -> None:
         concurrency=args.concurrency,
         max_tokens=args.max_tokens,
         retries=args.retries,
+        apply_caps=not args.disable_metric_caps,
     )
 
     if not args.no_cache:
