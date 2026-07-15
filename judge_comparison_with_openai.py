@@ -27,7 +27,7 @@ from typing import Any
 import openai
 from openai import AsyncOpenAI
 
-RUBRIC_VERSION = "srh-judge-v2"
+RUBRIC_VERSION = "srh-judge-v3"
 DEFAULT_MODEL = os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o-mini")
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_CONCURRENCY = 4
@@ -260,7 +260,10 @@ def item_cache_key(model: str, item: dict[str, Any]) -> str:
         "reference": item["reference"],
         "prediction": item["prediction"],
         "language": item.get("language", ""),
+        "source_dataset": item.get("source_dataset", ""),
+        "display_name": item.get("display_name", ""),
         "candidate": item["candidate"],
+        "metrics": item.get("metrics", {}),
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -276,6 +279,7 @@ def build_items(
         question = row.get("question", "")
         reference = row.get("reference_answer", "")
         language = row.get("language", "")
+        source_dataset = row.get("source_dataset", "")
         display_name = row.get("display_name", "")
 
         for column in prediction_columns:
@@ -305,6 +309,7 @@ def build_items(
                     "candidate": candidate,
                     "prediction_column": column,
                     "language": language,
+                    "source_dataset": source_dataset,
                     "display_name": display_name,
                     "question": question,
                     "reference": reference,
@@ -316,11 +321,25 @@ def build_items(
     return items
 
 
+def expects_geez_script(item: dict[str, Any]) -> bool:
+    """Return whether Latin letters should be treated as script leakage."""
+
+    language = str(item.get("language", "")).lower()
+    source_dataset = str(item.get("source_dataset", "")).lower()
+    display_name = str(item.get("display_name", "")).lower()
+    return (
+        language.startswith("amh")
+        or source_dataset.startswith("amh")
+        or "amharic" in display_name
+    )
+
+
 def build_user_message(items: list[dict[str, Any]]) -> str:
     payload = [
         {
             "id": item["id"],
             "language": item.get("display_name") or item.get("language"),
+            "source_dataset": item.get("source_dataset", ""),
             "question": item["question"],
             "reference_answer": item["reference"],
             "prediction_to_judge": item["prediction"],
@@ -390,7 +409,7 @@ def apply_metric_caps(result: dict[str, Any], item: dict[str, Any]) -> dict[str,
         reasons.append("runaway_length")
     if metrics.get("script_match_ratio", 1.0) < 0.85:
         reasons.append("low_target_script_match")
-    if metrics.get("latin_leak_ratio", 0.0) > 0.15:
+    if expects_geez_script(item) and metrics.get("latin_leak_ratio", 0.0) > 0.15:
         reasons.append("latin_code_switch_leakage")
 
     if not reasons:
