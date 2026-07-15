@@ -171,6 +171,7 @@ Local data may also be stored as source leaves such as `data/eng_uga/` and
 | Mirror data | `python3 medigemma/prepare_data.py` | `python3 'meditron train scripts/prepare_data.py'` |
 | Train or eval | `python3 medigemma/train.py` | `python3 'meditron train scripts/train.py'` |
 | Compare baseline vs adapter | `python3 medigemma/compare_models.py` | `python3 'meditron train scripts/compare_models.py'` |
+| LLM judge comparison CSV | `python3 judge_comparison_with_openai.py` | `python3 judge_comparison_with_openai.py` |
 | Push adapters to Hub | `python3 medigemma/push_adapters_to_hub.py` | `python3 'meditron train scripts/push_adapters_to_hub.py'` |
 | Run Hub inference | `python3 medigemma/run_inference_from_hub.py` | `python3 'meditron train scripts/run_inference_from_hub.py'` |
 
@@ -553,3 +554,52 @@ python3 'meditron train scripts/run_inference_from_hub.py' \
 - Clinical acceptance should use a separate rubric: factual correctness,
   coverage of required clinical facts, absence of harmful advice, appropriate
   referral/triage language, and target-language fluency.
+
+### Optional LLM-as-Judge Review
+
+Use LLM-as-judge after `compare_models.py` has produced a row-level comparison
+CSV. The judge scores each baseline and adapter answer using a clinical SRH
+rubric:
+
+- `clinical_correctness`
+- `completeness`
+- `safety`
+- `language_quality`
+- `helpfulness`
+- `overall`
+- `critical_error`
+- `harmful_advice`
+
+Set the OpenAI token as an environment variable. Do not paste tokens into the
+command or commit them to the repo.
+
+```bash
+export OPENAI_API_KEY="your-token-here"
+```
+
+Run the judge on a comparison CSV:
+
+```bash
+python3 judge_comparison_with_openai.py \
+  --comparison_csv ./reports/amh_baseline_vs_adapter_v2.csv \
+  --output_csv ./reports/amh_baseline_vs_adapter_llm_judged.csv \
+  --report_json ./reports/amh_llm_judge_report.json \
+  --batch_size 8 \
+  --concurrency 4
+```
+
+For a small smoke test:
+
+```bash
+python3 judge_comparison_with_openai.py \
+  --comparison_csv ./reports/amh_baseline_vs_adapter_v2.csv \
+  --output_csv ./reports/amh_llm_judge_smoke.csv \
+  --report_json ./reports/amh_llm_judge_smoke.json \
+  --max_rows 5 \
+  --batch_size 5 \
+  --concurrency 1
+```
+
+LLM judging is a screening layer, not final clinical approval. Use it to compare
+model versions and prioritize manual review; final deployment decisions should
+still include clinician review of sampled outputs and all high-risk failures.
