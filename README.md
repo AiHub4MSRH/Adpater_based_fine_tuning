@@ -545,5 +545,11 @@ python3 'meditron train scripts/run_inference_from_hub.py' \
 - Treat `num_epochs` in the config as a ceiling. Low-resource adapters may stop
   much earlier when dev loss starts rising.
 - The train scripts run evaluation after training unless `--eval_only` is used.
-- Exact Match is strict for generative SRH answers, so review token F1,
-  ROUGE-L, and manual samples.
+- Exact Match is too strict to use as the headline metric for generative SRH
+  answers. Treat it as useful only for categorical or multiple-choice checks.
+- For free-form medical answers, review character n-gram F1, token F1,
+  ROUGE-L, target-script match, Latin/code-switch leakage, repetition rate,
+  length ratio, quality-flag rate, and manual sample predictions.
+- Clinical acceptance should use a separate rubric: factual correctness,
+  coverage of required clinical facts, absence of harmful advice, appropriate
+  referral/triage language, and target-language fluency.

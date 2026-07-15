@@ -25,6 +25,9 @@ added back.
 
 import json
 import logging
+import re
+import unicodedata
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -111,11 +114,12 @@ def _token_f1(prediction: str, ground_truth: str) -> float:
     gt_tokens = ground_truth.lower().split()
     if not pred_tokens or not gt_tokens:
         return 0.0
-    common = set(pred_tokens) & set(gt_tokens)
-    if not common:
+    common = Counter(pred_tokens) & Counter(gt_tokens)
+    overlap = sum(common.values())
+    if overlap == 0:
         return 0.0
-    precision = len(common) / len(pred_tokens)
-    recall = len(common) / len(gt_tokens)
+    precision = overlap / len(pred_tokens)
+    recall = overlap / len(gt_tokens)
     return 2 * precision * recall / (precision + recall)
 
 
@@ -144,6 +148,91 @@ def _rouge_l(prediction: str, reference: str) -> float:
     if precision + recall == 0:
         return 0.0
     return 2 * precision * recall / (precision + recall)
+
+
+def _normalize_for_char_metrics(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def _char_ngram_f1(prediction: str, reference: str, n: int = 3) -> float:
+    """Character n-gram F1, useful for morphologically rich languages."""
+
+    def ngrams(text: str) -> Counter[str]:
+        normalized = _normalize_for_char_metrics(text)
+        if len(normalized) < n:
+            return Counter([normalized]) if normalized else Counter()
+        return Counter(normalized[i : i + n] for i in range(len(normalized) - n + 1))
+
+    pred_grams = ngrams(prediction)
+    ref_grams = ngrams(reference)
+    if not pred_grams or not ref_grams:
+        return 0.0
+
+    overlap = sum((pred_grams & ref_grams).values())
+    precision = overlap / sum(pred_grams.values())
+    recall = overlap / sum(ref_grams.values())
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+
+def _letters(text: str) -> list[str]:
+    return [char for char in text if char.isalpha()]
+
+
+def _is_latin_letter(char: str) -> bool:
+    try:
+        return unicodedata.name(char).startswith("LATIN")
+    except ValueError:
+        return False
+
+
+def _script_match_ratio(text: str, target_script: str | None) -> float:
+    letters = _letters(text)
+    if not letters:
+        return 0.0
+
+    if target_script == "geez":
+        matches = sum(1 for char in letters if "\u1200" <= char <= "\u137f")
+    elif target_script == "latin":
+        matches = sum(1 for char in letters if _is_latin_letter(char))
+    else:
+        return 1.0
+    return matches / len(letters)
+
+
+def _latin_leak_ratio(text: str) -> float:
+    letters = _letters(text)
+    if not letters:
+        return 0.0
+    latin = sum(1 for char in letters if _is_latin_letter(char))
+    return latin / len(letters)
+
+
+def _repetition_ngram_rate(text: str, n: int = 4) -> float:
+    tokens = text.lower().split()
+    grams = [tuple(tokens[i : i + n]) for i in range(max(0, len(tokens) - n + 1))]
+    if not grams:
+        return 0.0
+    counts = Counter(grams)
+    repeated = sum(count - 1 for count in counts.values() if count > 1)
+    return repeated / len(grams)
+
+
+def _length_ratio(prediction: str, reference: str) -> float:
+    return len(prediction.split()) / max(len(reference.split()), 1)
+
+
+def _quality_flag(prediction: str, reference: str, target_script: str | None) -> float:
+    if not prediction.strip():
+        return 1.0
+    if _repetition_ngram_rate(prediction) > 0.2:
+        return 1.0
+    if _script_match_ratio(prediction, target_script) < 0.85:
+        return 1.0
+    if _length_ratio(prediction, reference) > 4.0:
+        return 1.0
+    return 0.0
 
 
 class MultilingualEvaluator:
@@ -249,6 +338,7 @@ class MultilingualEvaluator:
         lang_cfg = SUPPORTED_LANGUAGES.get(lang_code)
         language_name = lang_cfg.language_name if lang_cfg else lang_code
         display_name = lang_cfg.display_name if lang_cfg else lang_code
+        target_script = lang_cfg.script if lang_cfg else None
 
         try:
             dataset = self.dataset_builder.load_language(lang_code, lang_cfg, augment=False)
@@ -292,12 +382,44 @@ class MultilingualEvaluator:
                         "input": prompt,
                         "reference": reference,
                         "prediction": prediction,
+                        "char_3gram_f1": round(
+                            _char_ngram_f1(prediction, reference),
+                            4,
+                        ),
+                        "script_match_ratio": round(
+                            _script_match_ratio(prediction, target_script),
+                            4,
+                        ),
+                        "repetition_4gram_rate": round(
+                            _repetition_ngram_rate(prediction),
+                            4,
+                        ),
+                        "quality_flag": _quality_flag(
+                            prediction,
+                            reference,
+                            target_script,
+                        ),
                     }
                 )
 
         exact_matches = [_exact_match(pred, ref) for pred, ref in zip(predictions, references)]
         f1_scores = [_token_f1(pred, ref) for pred, ref in zip(predictions, references)]
         rouge_scores = [_rouge_l(pred, ref) for pred, ref in zip(predictions, references)]
+        char_scores = [
+            _char_ngram_f1(pred, ref) for pred, ref in zip(predictions, references)
+        ]
+        script_scores = [
+            _script_match_ratio(pred, target_script) for pred in predictions
+        ]
+        latin_scores = [_latin_leak_ratio(pred) for pred in predictions]
+        repetition_scores = [_repetition_ngram_rate(pred) for pred in predictions]
+        length_scores = [
+            _length_ratio(pred, ref) for pred, ref in zip(predictions, references)
+        ]
+        quality_flags = [
+            _quality_flag(pred, ref, target_script)
+            for pred, ref in zip(predictions, references)
+        ]
 
         results = {
             "language": lang_code,
@@ -307,6 +429,12 @@ class MultilingualEvaluator:
             "exact_match": round(sum(exact_matches) / n, 4),
             "f1_token": round(sum(f1_scores) / n, 4),
             "rouge_l": round(sum(rouge_scores) / n, 4),
+            "char_3gram_f1": round(sum(char_scores) / n, 4),
+            "script_match_ratio": round(sum(script_scores) / n, 4),
+            "latin_leak_ratio": round(sum(latin_scores) / n, 4),
+            "repetition_4gram_rate": round(sum(repetition_scores) / n, 4),
+            "length_ratio": round(sum(length_scores) / n, 4),
+            "quality_flag_rate": round(sum(quality_flags) / n, 4),
             "invalid_rate": round(invalid_count / n, 4),
             "resource_level": lang_cfg.resource_level if lang_cfg else "unknown",
             "sample_predictions": sample_predictions,
@@ -357,6 +485,30 @@ class MultilingualEvaluator:
                     sum(result["rouge_l"] for result in valid_results) / len(valid_results),
                     4,
                 ),
+                "macro_avg_char_3gram_f1": round(
+                    sum(result["char_3gram_f1"] for result in valid_results) / len(valid_results),
+                    4,
+                ),
+                "macro_avg_script_match_ratio": round(
+                    sum(result["script_match_ratio"] for result in valid_results) / len(valid_results),
+                    4,
+                ),
+                "macro_avg_latin_leak_ratio": round(
+                    sum(result["latin_leak_ratio"] for result in valid_results) / len(valid_results),
+                    4,
+                ),
+                "macro_avg_repetition_4gram_rate": round(
+                    sum(result["repetition_4gram_rate"] for result in valid_results) / len(valid_results),
+                    4,
+                ),
+                "macro_avg_length_ratio": round(
+                    sum(result["length_ratio"] for result in valid_results) / len(valid_results),
+                    4,
+                ),
+                "macro_avg_quality_flag_rate": round(
+                    sum(result["quality_flag_rate"] for result in valid_results) / len(valid_results),
+                    4,
+                ),
                 "macro_avg_invalid_rate": round(
                     sum(result["invalid_rate"] for result in valid_results) / len(valid_results),
                     4,
@@ -386,6 +538,9 @@ class MultilingualEvaluator:
                     f"EM={metrics['exact_match']:.3f}  "
                     f"F1={metrics['f1_token']:.3f}  "
                     f"ROUGE-L={metrics['rouge_l']:.3f}  "
+                    f"Char3={metrics['char_3gram_f1']:.3f}  "
+                    f"Script={metrics['script_match_ratio']:.3f}  "
+                    f"Rep={metrics['repetition_4gram_rate']:.3f}  "
                     f"Invalid={metrics['invalid_rate']:.3f}"
                 )
 
@@ -397,6 +552,9 @@ class MultilingualEvaluator:
                 f"EM={aggregate['macro_avg_exact_match']:.3f}  "
                 f"F1={aggregate['macro_avg_f1']:.3f}  "
                 f"ROUGE-L={aggregate['macro_avg_rouge_l']:.3f}  "
+                f"Char3={aggregate['macro_avg_char_3gram_f1']:.3f}  "
+                f"Script={aggregate['macro_avg_script_match_ratio']:.3f}  "
+                f"Rep={aggregate['macro_avg_repetition_4gram_rate']:.3f}  "
                 f"Invalid={aggregate['macro_avg_invalid_rate']:.3f}"
             )
         print("═" * 72 + "\n")

@@ -19,6 +19,9 @@ import csv
 import json
 import logging
 import os
+import re
+import unicodedata
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -37,7 +40,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-METRIC_KEYS = ("exact_match", "f1_token", "rouge_l", "invalid_rate", "mcq_accuracy")
+METRIC_KEYS = (
+    "exact_match",
+    "f1_token",
+    "rouge_l",
+    "char_3gram_f1",
+    "script_match_ratio",
+    "latin_leak_ratio",
+    "repetition_4gram_rate",
+    "length_ratio",
+    "quality_flag_rate",
+    "invalid_rate",
+    "mcq_accuracy",
+)
 
 
 def parse_args():
@@ -258,13 +273,124 @@ def token_f1(prediction: str, ground_truth: str) -> float:
     if not pred_tokens or not gt_tokens:
         return 0.0
 
-    common = set(pred_tokens) & set(gt_tokens)
-    if not common:
+    common = Counter(pred_tokens) & Counter(gt_tokens)
+    overlap = sum(common.values())
+    if overlap == 0:
         return 0.0
 
-    precision = len(common) / len(pred_tokens)
-    recall = len(common) / len(gt_tokens)
+    precision = overlap / len(pred_tokens)
+    recall = overlap / len(gt_tokens)
     return 2 * precision * recall / (precision + recall)
+
+
+def _normalize_for_char_metrics(text: str) -> str:
+    """Normalize whitespace and casing while keeping native-script characters."""
+
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def char_ngram_f1(prediction: str, reference: str, n: int = 3) -> float:
+    """
+    Compute character n-gram F1.
+
+    This is a better automatic proxy than exact match for Amharic and other
+    morphologically rich languages because it rewards partial wording overlap
+    even when token boundaries differ.
+    """
+
+    def ngrams(text: str) -> Counter[str]:
+        normalized = _normalize_for_char_metrics(text)
+        if len(normalized) < n:
+            return Counter([normalized]) if normalized else Counter()
+        return Counter(normalized[i : i + n] for i in range(len(normalized) - n + 1))
+
+    pred_grams = ngrams(prediction)
+    ref_grams = ngrams(reference)
+    if not pred_grams or not ref_grams:
+        return 0.0
+
+    overlap = sum((pred_grams & ref_grams).values())
+    precision = overlap / sum(pred_grams.values())
+    recall = overlap / sum(ref_grams.values())
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+
+def _letters(text: str) -> list[str]:
+    return [char for char in text if char.isalpha()]
+
+
+def _is_latin_letter(char: str) -> bool:
+    try:
+        return unicodedata.name(char).startswith("LATIN")
+    except ValueError:
+        return False
+
+
+def script_match_ratio(text: str, target_script: str | None) -> float:
+    """Estimate how much of the answer uses the expected writing system."""
+
+    letters = _letters(text)
+    if not letters:
+        return 0.0
+
+    if target_script == "geez":
+        matches = sum(1 for char in letters if "\u1200" <= char <= "\u137f")
+    elif target_script == "latin":
+        matches = sum(1 for char in letters if _is_latin_letter(char))
+    else:
+        return 1.0
+    return matches / len(letters)
+
+
+def latin_leak_ratio(text: str) -> float:
+    """Measure Latin-script leakage, useful for Amharic code-switch detection."""
+
+    letters = _letters(text)
+    if not letters:
+        return 0.0
+    latin = sum(1 for char in letters if _is_latin_letter(char))
+    return latin / len(letters)
+
+
+def repetition_ngram_rate(text: str, n: int = 4) -> float:
+    """Return the fraction of repeated token n-grams in a generated answer."""
+
+    tokens = text.lower().split()
+    grams = [tuple(tokens[i : i + n]) for i in range(max(0, len(tokens) - n + 1))]
+    if not grams:
+        return 0.0
+
+    counts = Counter(grams)
+    repeated = sum(count - 1 for count in counts.values() if count > 1)
+    return repeated / len(grams)
+
+
+def length_ratio(prediction: str, reference: str) -> float:
+    """Compare answer length against the reference answer."""
+
+    reference_len = max(len(reference.split()), 1)
+    return len(prediction.split()) / reference_len
+
+
+def quality_flag(prediction: str, reference: str, target_script: str | None) -> float:
+    """
+    Flag obvious generation-quality failures.
+
+    This catches empty answers, severe repetition, target-script failure, and
+    very long run-on generations. It is not a clinical correctness score.
+    """
+
+    if not prediction.strip():
+        return 1.0
+    if repetition_ngram_rate(prediction) > 0.2:
+        return 1.0
+    if script_match_ratio(prediction, target_script) < 0.85:
+        return 1.0
+    if length_ratio(prediction, reference) > 4.0:
+        return 1.0
+    return 0.0
 
 
 def rouge_l(prediction: str, reference: str) -> float:
@@ -292,7 +418,11 @@ def rouge_l(prediction: str, reference: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-def summarize_metrics(predictions: list[str], examples: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize_metrics(
+    predictions: list[str],
+    examples: list[dict[str, Any]],
+    target_script: str | None = None,
+) -> dict[str, Any]:
     """Aggregate the same core metrics used by the existing evaluator."""
 
     references = [example["output"] for example in examples]
@@ -302,12 +432,27 @@ def summarize_metrics(predictions: list[str], examples: list[dict[str, Any]]) ->
     exact_scores = [exact_match(pred, ref) for pred, ref in zip(predictions, references)]
     f1_scores = [token_f1(pred, ref) for pred, ref in zip(predictions, references)]
     rouge_scores = [rouge_l(pred, ref) for pred, ref in zip(predictions, references)]
+    char_scores = [char_ngram_f1(pred, ref) for pred, ref in zip(predictions, references)]
+    script_scores = [script_match_ratio(pred, target_script) for pred in predictions]
+    latin_scores = [latin_leak_ratio(pred) for pred in predictions]
+    repetition_scores = [repetition_ngram_rate(pred) for pred in predictions]
+    length_scores = [length_ratio(pred, ref) for pred, ref in zip(predictions, references)]
+    quality_flags = [
+        quality_flag(pred, ref, target_script)
+        for pred, ref in zip(predictions, references)
+    ]
 
     summary = {
         "n_evaluated": n,
         "exact_match": round(sum(exact_scores) / n, 4),
         "f1_token": round(sum(f1_scores) / n, 4),
         "rouge_l": round(sum(rouge_scores) / n, 4),
+        "char_3gram_f1": round(sum(char_scores) / n, 4),
+        "script_match_ratio": round(sum(script_scores) / n, 4),
+        "latin_leak_ratio": round(sum(latin_scores) / n, 4),
+        "repetition_4gram_rate": round(sum(repetition_scores) / n, 4),
+        "length_ratio": round(sum(length_scores) / n, 4),
+        "quality_flag_rate": round(sum(quality_flags) / n, 4),
         "invalid_rate": round(invalid_count / n, 4),
     }
 
@@ -355,6 +500,30 @@ def compute_aggregate(per_language: dict[str, dict[str, Any]]) -> dict[str, Any]
             sum(result["rouge_l"] for result in valid_results) / len(valid_results),
             4,
         ),
+        "macro_avg_char_3gram_f1": round(
+            sum(result["char_3gram_f1"] for result in valid_results) / len(valid_results),
+            4,
+        ),
+        "macro_avg_script_match_ratio": round(
+            sum(result["script_match_ratio"] for result in valid_results) / len(valid_results),
+            4,
+        ),
+        "macro_avg_latin_leak_ratio": round(
+            sum(result["latin_leak_ratio"] for result in valid_results) / len(valid_results),
+            4,
+        ),
+        "macro_avg_repetition_4gram_rate": round(
+            sum(result["repetition_4gram_rate"] for result in valid_results) / len(valid_results),
+            4,
+        ),
+        "macro_avg_length_ratio": round(
+            sum(result["length_ratio"] for result in valid_results) / len(valid_results),
+            4,
+        ),
+        "macro_avg_quality_flag_rate": round(
+            sum(result["quality_flag_rate"] for result in valid_results) / len(valid_results),
+            4,
+        ),
         "macro_avg_invalid_rate": round(
             sum(result["invalid_rate"] for result in valid_results) / len(valid_results),
             4,
@@ -381,6 +550,12 @@ def compute_aggregate_delta(
         "macro_avg_exact_match": "exact_match",
         "macro_avg_f1": "f1_token",
         "macro_avg_rouge_l": "rouge_l",
+        "macro_avg_char_3gram_f1": "char_3gram_f1",
+        "macro_avg_script_match_ratio": "script_match_ratio",
+        "macro_avg_latin_leak_ratio": "latin_leak_ratio",
+        "macro_avg_repetition_4gram_rate": "repetition_4gram_rate",
+        "macro_avg_length_ratio": "length_ratio",
+        "macro_avg_quality_flag_rate": "quality_flag_rate",
         "macro_avg_invalid_rate": "invalid_rate",
         "macro_avg_mcq_accuracy": "mcq_accuracy",
     }
@@ -526,7 +701,11 @@ def main():
                 "display_name": display_name,
                 "language_name": language_name,
                 "resource_level": lang_cfg.resource_level,
-                **summarize_metrics(baseline_predictions, examples),
+                **summarize_metrics(
+                    baseline_predictions,
+                    examples,
+                    target_script=lang_cfg.script,
+                ),
             }
             baseline_per_language[lang_code] = baseline_metrics
 
@@ -633,7 +812,11 @@ def main():
                 "display_name": display_name,
                 "language_name": language_name,
                 "resource_level": lang_cfg.resource_level,
-                **summarize_metrics(adapter_predictions, examples),
+                **summarize_metrics(
+                    adapter_predictions,
+                    examples,
+                    target_script=lang_cfg.script,
+                ),
             }
             comparison_per_language[lang_code] = {
                 "baseline": baseline_metrics,
@@ -642,6 +825,9 @@ def main():
             }
 
             for index, example in enumerate(examples):
+                reference_answer = example["output"]
+                baseline_prediction = baseline_predictions[index]
+                adapter_prediction = adapter_predictions[index]
                 rows.append(
                     {
                         "language": lang_code,
@@ -649,16 +835,66 @@ def main():
                         "split": args.split,
                         "example_index": index,
                         "question": example["input"],
-                        "reference_answer": example["output"],
-                        "baseline_prediction": baseline_predictions[index],
-                        "adapter_prediction": adapter_predictions[index],
+                        "reference_answer": reference_answer,
+                        "baseline_prediction": baseline_prediction,
+                        "adapter_prediction": adapter_prediction,
                         "baseline_exact_match": exact_match(
-                            baseline_predictions[index],
-                            example["output"],
+                            baseline_prediction,
+                            reference_answer,
                         ),
                         "adapter_exact_match": exact_match(
-                            adapter_predictions[index],
-                            example["output"],
+                            adapter_prediction,
+                            reference_answer,
+                        ),
+                        "baseline_char_3gram_f1": round(
+                            char_ngram_f1(baseline_prediction, reference_answer),
+                            4,
+                        ),
+                        "adapter_char_3gram_f1": round(
+                            char_ngram_f1(adapter_prediction, reference_answer),
+                            4,
+                        ),
+                        "baseline_script_match_ratio": round(
+                            script_match_ratio(baseline_prediction, lang_cfg.script),
+                            4,
+                        ),
+                        "adapter_script_match_ratio": round(
+                            script_match_ratio(adapter_prediction, lang_cfg.script),
+                            4,
+                        ),
+                        "baseline_latin_leak_ratio": round(
+                            latin_leak_ratio(baseline_prediction),
+                            4,
+                        ),
+                        "adapter_latin_leak_ratio": round(
+                            latin_leak_ratio(adapter_prediction),
+                            4,
+                        ),
+                        "baseline_repetition_4gram_rate": round(
+                            repetition_ngram_rate(baseline_prediction),
+                            4,
+                        ),
+                        "adapter_repetition_4gram_rate": round(
+                            repetition_ngram_rate(adapter_prediction),
+                            4,
+                        ),
+                        "baseline_length_ratio": round(
+                            length_ratio(baseline_prediction, reference_answer),
+                            4,
+                        ),
+                        "adapter_length_ratio": round(
+                            length_ratio(adapter_prediction, reference_answer),
+                            4,
+                        ),
+                        "baseline_quality_flag": quality_flag(
+                            baseline_prediction,
+                            reference_answer,
+                            lang_cfg.script,
+                        ),
+                        "adapter_quality_flag": quality_flag(
+                            adapter_prediction,
+                            reference_answer,
+                            lang_cfg.script,
                         ),
                     }
                 )
@@ -707,6 +943,18 @@ def main():
                 "adapter_prediction",
                 "baseline_exact_match",
                 "adapter_exact_match",
+                "baseline_char_3gram_f1",
+                "adapter_char_3gram_f1",
+                "baseline_script_match_ratio",
+                "adapter_script_match_ratio",
+                "baseline_latin_leak_ratio",
+                "adapter_latin_leak_ratio",
+                "baseline_repetition_4gram_rate",
+                "adapter_repetition_4gram_rate",
+                "baseline_length_ratio",
+                "adapter_length_ratio",
+                "baseline_quality_flag",
+                "adapter_quality_flag",
             ],
         )
         writer.writeheader()
