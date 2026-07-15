@@ -57,6 +57,7 @@ class LanguageConfig:
     grad_accumulation: int = 4
     learning_rate: float = 2e-4
     early_stopping_patience: Optional[int] = 3
+    early_stopping_threshold: float = 0.001
     transfer_from: Optional[str] = None
     source_datasets: tuple[str, ...] = ()
 

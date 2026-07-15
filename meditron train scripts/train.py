@@ -213,6 +213,9 @@ def build_sft_config(
     else:
         logger.warning("No CUDA device detected. Training on CPU is impractical for a 7B model.")
 
+    eval_steps = 50 if has_eval else None
+    save_steps = eval_steps if has_eval else 500
+
     kwargs = {
         "output_dir": str(adapter_output_dir),
         "num_train_epochs": lang_cfg.num_epochs,
@@ -225,13 +228,13 @@ def build_sft_config(
         "fp16": use_fp16,
         "bf16": use_bf16,
         "logging_steps": 10,
-        "eval_steps": 50 if has_eval else None,
+        "eval_steps": eval_steps,
         "save_strategy": "steps",
-        "save_steps": 500,
+        "save_steps": save_steps,
         "save_total_limit": 2,
-        # Disabled: PEFT's nested checkpoint layout can block training on some
-        # VM configurations when the optimizer state is large.
-        "load_best_model_at_end": False,
+        "load_best_model_at_end": has_eval,
+        "metric_for_best_model": "eval_loss",
+        "greater_is_better": False,
         "report_to": "none",
         "gradient_checkpointing": True,
         # We pre-tokenize the dataset ourselves, so tell TRL not to reprocess.
@@ -254,6 +257,8 @@ def build_sft_config(
 
     # Avoid writing optimizer state to disk (major space/time savings on VM)
     if "save_only_model" in params:
+        # Model-only checkpoints are sufficient for best-model reload and final
+        # adapter export, while avoiding very large optimizer-state writes.
         kwargs["save_only_model"] = True
 
     # max_length vs max_seq_length
@@ -393,16 +398,19 @@ def train_language_adapter(
     )
 
     callbacks = []
-    use_early_stopping = bool(
-        eval_tokens is not None
-        and lang_cfg.early_stopping_patience
-        and getattr(sft_cfg, "load_best_model_at_end", False)
-    )
+    use_early_stopping = bool(eval_tokens is not None and lang_cfg.early_stopping_patience)
     if use_early_stopping:
         callbacks.append(
             EarlyStoppingCallback(
                 early_stopping_patience=lang_cfg.early_stopping_patience,
+                early_stopping_threshold=lang_cfg.early_stopping_threshold,
             )
+        )
+        logger.info(
+            "Early stopping enabled for %s: patience=%s evaluations, threshold=%s.",
+            language,
+            lang_cfg.early_stopping_patience,
+            lang_cfg.early_stopping_threshold,
         )
 
     data_collator = DataCollatorForLanguageModeling(
@@ -441,6 +449,8 @@ def train_language_adapter(
         "lora_r":        lang_cfg.lora_r,
         "num_epochs":    lang_cfg.num_epochs,
         "learning_rate": lang_cfg.learning_rate,
+        "early_stopping_patience": lang_cfg.early_stopping_patience,
+        "early_stopping_threshold": lang_cfg.early_stopping_threshold,
         "train_samples": len(train_tokens),
         "dev_samples":   len(eval_tokens) if eval_tokens is not None else 0,
         "base_model":    cfg.model_id,

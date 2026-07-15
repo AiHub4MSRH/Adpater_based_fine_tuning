@@ -530,6 +530,12 @@ python3 'meditron train scripts/run_inference_from_hub.py' \
 - Keep `./adapters/medigemma` and `./adapters/meditron` separate.
 - Use `--precision full_lora` for final-quality runs.
 - Use `--precision qlora` only when full-precision LoRA does not fit.
+- Training uses dev-set early stopping when a `dev` split is available. The
+  scripts evaluate and save every 50 steps, track `eval_loss`, reload the best
+  checkpoint at the end, and stop after the language-specific patience is
+  exhausted.
+- Treat `num_epochs` in the config as a ceiling. Low-resource adapters may stop
+  much earlier when dev loss starts rising.
 - The train scripts run evaluation after training unless `--eval_only` is used.
 - Exact Match is strict for generative SRH answers, so review token F1,
   ROUGE-L, and manual samples.
