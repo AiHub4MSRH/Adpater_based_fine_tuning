@@ -539,6 +539,7 @@ To run source-leaf reporting with his prompt style:
 ```bash
 python3 medigemma/evaluate_external_adapter.py \
   --data_root ./data \
+  --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET \
   --languages aka amh eng lug swa \
   --adapter_repo DariusTheGeek/mhqa-itu-adapters \
   --adapter_subfolder gen7454 \
@@ -547,20 +548,21 @@ python3 medigemma/evaluate_external_adapter.py \
   --inference_backend vllm \
   --prompt_style darius \
   --use_source_leaves \
+  --require_source_leaves \
+  --max_eval_samples_per_source 100 \
   --skip_baseline \
   --load_in_4bit \
   --tensor_parallel_size 1 \
   --max_model_len 2048 \
   --lora_rank 64 \
-  --max_eval_samples 100000 \
   --output_dir ./reports
 ```
 
 If your local `./data` directory only contains combined `eng/` and `swa/`
-folders, the script will fall back to those combined targets. If you want
-source-leaf reporting for `eng_eth`, `eng_gha`, `eng_ken`, `eng_uga`,
-`swa_ken`, and `swa_uga`, provide a local source-leaf mirror or add
-`--dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET`.
+folders, use `--dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET` so the evaluator
+can fetch `eng_eth`, `eng_gha`, `eng_ken`, `eng_uga`, `swa_ken`, and `swa_uga`.
+Keep `--require_source_leaves` on for Brainiac checks so the run fails loudly
+instead of silently falling back to combined `eng` and `swa` data.
 
 Run the OpenAI judge on the external-adapter comparison:
 

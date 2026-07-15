@@ -18,13 +18,13 @@ import csv
 import json
 import logging
 import os
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
 import torch
 from datasets import concatenate_datasets
 from huggingface_hub import hf_hub_download, snapshot_download
-from peft import PeftModel
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
@@ -116,6 +116,24 @@ def parse_args() -> argparse.Namespace:
         help=(
             "For combined targets such as eng and swa, load individual source "
             "leaves when available so reports include source-specific rows."
+        ),
+    )
+    parser.add_argument(
+        "--require_source_leaves",
+        action="store_true",
+        help=(
+            "When --use_source_leaves is set, fail if any requested source leaf "
+            "cannot be loaded instead of falling back to the combined target."
+        ),
+    )
+    parser.add_argument(
+        "--max_eval_samples_per_source",
+        type=int,
+        default=None,
+        help=(
+            "Sample up to this many examples from each loaded source leaf or "
+            "single target before concatenation. If omitted, --max_eval_samples "
+            "is applied after concatenating all loaded sources."
         ),
     )
     parser.add_argument(
@@ -347,6 +365,8 @@ def load_external_adapter_model(
     cache_dir: Optional[str],
     hf_token: Optional[str],
 ):
+    from peft import PeftModel
+
     logger.info(
         "Loading external adapter %s/%s on base %s",
         adapter_repo,
@@ -647,17 +667,24 @@ def load_eval_examples(
     lang_code: str,
     split: str,
     max_eval_samples: int,
+    max_eval_samples_per_source: Optional[int],
     use_source_leaves: bool,
+    require_source_leaves: bool,
     dataset_builder: MultilingualDatasetBuilder,
     seed: int,
 ) -> list[dict[str, Any]]:
     source_ids = source_ids_for_target(lang_code, use_source_leaves)
     parts = []
     load_errors = []
+    loaded_source_ids = []
+    requested_source_leaves = (
+        use_source_leaves and bool(SUPPORTED_LANGUAGES[lang_code].source_datasets)
+    )
 
-    for source_id in source_ids:
+    for source_index, source_id in enumerate(source_ids):
         source_cfg = SOURCE_DATASETS.get(source_id, SUPPORTED_LANGUAGES.get(source_id))
         if source_cfg is None:
+            load_errors.append(f"{source_id}: no dataset config")
             continue
         try:
             dataset = dataset_builder.load_language(source_id, source_cfg, augment=False)
@@ -666,13 +693,44 @@ def load_eval_examples(
             load_errors.append(f"{source_id}: {exc}")
             continue
 
-        if split_ds is None or len(split_ds) == 0:
+        if split_ds is None:
+            load_errors.append(f"{source_id}: no {split} split")
+            continue
+        if len(split_ds) == 0:
+            load_errors.append(f"{source_id}: empty {split} split")
             continue
 
-        columns = [column for column in ("input", "output", "label") if column in split_ds.column_names]
+        columns = [
+            column
+            for column in ("input", "output", "label")
+            if column in split_ds.column_names
+        ]
         part = split_ds.select_columns(columns)
         part = part.add_column("_source_dataset", [source_id] * len(part))
+        part = part.add_column("_source_example_index", list(range(len(part))))
+        if max_eval_samples_per_source is not None:
+            n = min(len(part), max_eval_samples_per_source)
+            part = part.shuffle(seed=seed + source_index).select(range(n))
         parts.append(part)
+        loaded_source_ids.append(source_id)
+
+    if requested_source_leaves and require_source_leaves:
+        missing_source_ids = [
+            source_id for source_id in source_ids if source_id not in loaded_source_ids
+        ]
+        if missing_source_ids:
+            details = "; ".join(load_errors) if load_errors else "no loader details"
+            raise FileNotFoundError(
+                f"Required source leaves for {lang_code} were not all available. "
+                f"Missing: {missing_source_ids}. Loaded: {loaded_source_ids}. Details: {details}"
+            )
+
+    if requested_source_leaves and load_errors and not require_source_leaves:
+        logger.warning(
+            "Some source leaves for %s could not be loaded and will be omitted: %s",
+            lang_code,
+            "; ".join(load_errors),
+        )
 
     if not parts and use_source_leaves and SUPPORTED_LANGUAGES[lang_code].source_datasets:
         logger.warning(
@@ -684,7 +742,9 @@ def load_eval_examples(
             lang_code=lang_code,
             split=split,
             max_eval_samples=max_eval_samples,
+            max_eval_samples_per_source=max_eval_samples_per_source,
             use_source_leaves=False,
+            require_source_leaves=False,
             dataset_builder=dataset_builder,
             seed=seed,
         )
@@ -695,8 +755,11 @@ def load_eval_examples(
         raise ValueError(f"No {split} examples found for {lang_code}")
 
     combined = concatenate_datasets(parts).shuffle(seed=seed)
-    n = min(len(combined), max_eval_samples)
-    selected = combined.select(range(n))
+    if max_eval_samples_per_source is None:
+        n = min(len(combined), max_eval_samples)
+        selected = combined.select(range(n))
+    else:
+        selected = combined
     return [selected[idx] for idx in range(len(selected))]
 
 
@@ -724,6 +787,16 @@ def blank_baseline_metrics(lang_code: str, details: str = "") -> dict[str, Any]:
 
 def main() -> None:
     args = parse_args()
+    if args.require_source_leaves and not args.use_source_leaves:
+        raise SystemExit("--require_source_leaves requires --use_source_leaves.")
+    if args.max_eval_samples <= 0:
+        raise SystemExit("--max_eval_samples must be positive.")
+    if (
+        args.max_eval_samples_per_source is not None
+        and args.max_eval_samples_per_source <= 0
+    ):
+        raise SystemExit("--max_eval_samples_per_source must be positive.")
+
     hf_token = args.hf_token or os.environ.get("HF_TOKEN")
     cfg = TrainingConfig()
     csv_path, report_json = resolve_output_paths(args)
@@ -748,6 +821,7 @@ def main() -> None:
     baseline_per_language: dict[str, dict[str, Any]] = {}
     candidate_per_language: dict[str, dict[str, Any]] = {}
     comparison_per_language: dict[str, dict[str, Any]] = {}
+    source_counts_by_language: dict[str, dict[str, int]] = {}
 
     for lang_code in languages:
         lang_cfg = SUPPORTED_LANGUAGES[lang_code]
@@ -756,7 +830,9 @@ def main() -> None:
                 lang_code=lang_code,
                 split=args.split,
                 max_eval_samples=args.max_eval_samples,
+                max_eval_samples_per_source=args.max_eval_samples_per_source,
                 use_source_leaves=args.use_source_leaves,
+                require_source_leaves=args.require_source_leaves,
                 dataset_builder=dataset_builder,
                 seed=cfg.seed,
             )
@@ -774,7 +850,17 @@ def main() -> None:
 
         examples_by_language[lang_code] = examples
         rows_by_language[lang_code] = []
-        logger.info("Loaded %s %s examples for %s", len(examples), args.split, lang_code)
+        source_counts = dict(
+            Counter(example.get("_source_dataset", lang_code) for example in examples)
+        )
+        source_counts_by_language[lang_code] = source_counts
+        logger.info(
+            "Loaded %s %s examples for %s from sources: %s",
+            len(examples),
+            args.split,
+            lang_code,
+            source_counts,
+        )
 
         if args.skip_baseline:
             baseline_predictions_by_language[lang_code] = [""] * len(examples)
@@ -885,6 +971,7 @@ def main() -> None:
                 "display_name": lang_cfg.display_name,
                 "language_name": lang_cfg.language_name,
                 "resource_level": lang_cfg.resource_level,
+                "source_counts": source_counts_by_language.get(lang_code, {}),
                 **summarize_metrics(
                     candidate_predictions,
                     examples,
@@ -925,6 +1012,7 @@ def main() -> None:
                         "display_name": lang_cfg.display_name,
                         "split": args.split,
                         "example_index": index,
+                        "source_example_index": example.get("_source_example_index", ""),
                         "question": example["input"],
                         "reference_answer": reference_answer,
                         "baseline_prediction": baseline_prediction,
@@ -1021,6 +1109,7 @@ def main() -> None:
         "display_name",
         "split",
         "example_index",
+        "source_example_index",
         "question",
         "reference_answer",
         "baseline_prediction",
@@ -1062,6 +1151,10 @@ def main() -> None:
         "baseline_model": None if args.skip_baseline else args.baseline_model,
         "split": args.split,
         "max_eval_samples": args.max_eval_samples,
+        "max_eval_samples_per_source": args.max_eval_samples_per_source,
+        "use_source_leaves": args.use_source_leaves,
+        "require_source_leaves": args.require_source_leaves,
+        "source_counts": source_counts_by_language,
         "csv_path": str(csv_path),
         "per_language": comparison_per_language,
         "aggregate": {
