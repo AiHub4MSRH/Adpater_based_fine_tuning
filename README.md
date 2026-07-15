@@ -459,11 +459,24 @@ Start with `gen7454`, because it is the Brainiac adapter trained across all
 eight challenge subsets. Use `--load_in_4bit` for the first run unless you
 explicitly want full-weight loading.
 
+The Brainiac path uses vLLM. If `python3 -c "import vllm"` fails, use an image
+or environment with vLLM installed before running the commands below; this is
+the same serving dependency used by Darius' generation scripts.
+
 If your virtual environment was created before this external-adapter evaluator
 was added, upgrade the ML stack first:
 
 ```bash
 pip install -U -r requirements.txt
+```
+
+If a previous upgrade installed `torch==2.13.x` inside `.venv` and you see a
+`torchvision ... requires torch==2.12.0` conflict, remove the local Torch wheel
+so the CUDA-matched image wheel is used again:
+
+```bash
+pip uninstall -y torch triton cuda-toolkit
+python3 -c "import torch; print(torch.__version__, torch.version.cuda)"
 ```
 
 Smoke test across all supported adapter targets:
@@ -476,8 +489,13 @@ python3 medigemma/evaluate_external_adapter.py \
   --adapter_subfolder gen7454 \
   --adapter_base_model google/gemma-4-31B-it \
   --candidate_name darius_gen7454 \
-  --prompt_style hashie \
+  --inference_backend vllm \
+  --prompt_style darius \
+  --skip_baseline \
   --load_in_4bit \
+  --tensor_parallel_size 1 \
+  --max_model_len 2048 \
+  --lora_rank 64 \
   --max_eval_samples 20 \
   --output_dir ./reports
 ```
@@ -492,8 +510,13 @@ python3 medigemma/evaluate_external_adapter.py \
   --adapter_subfolder gen7454 \
   --adapter_base_model google/gemma-4-31B-it \
   --candidate_name darius_gen7454 \
-  --prompt_style hashie \
+  --inference_backend vllm \
+  --prompt_style darius \
+  --skip_baseline \
   --load_in_4bit \
+  --tensor_parallel_size 1 \
+  --max_model_len 2048 \
+  --lora_rank 64 \
   --max_eval_samples 100000 \
   --output_dir ./reports
 ```
@@ -503,9 +526,15 @@ This writes:
 - `reports/darius_gen7454_test_comparison.csv`
 - `reports/darius_gen7454_test_comparison_report.json`
 
+For Darius' Gemma-4 adapter, prefer `--inference_backend vllm`. His published
+`gen7454` adapter targets Gemma-4 clippable linear layers that vanilla PEFT does
+not inject into correctly, while his own generation code serves the LoRA through
+vLLM's `LoRARequest`.
+
 The default `--prompt_style hashie` is the fairest apples-to-apples comparison
-against our adapters because it uses the same Hashie evaluation prompt. To test
-the external adapter closer to its original prompt style, use:
+against our adapters for ordinary external adapters. For Brainiac, start with
+`--prompt_style darius`, because it mirrors his subset-aware inference prompt.
+To run source-leaf reporting with his prompt style:
 
 ```bash
 python3 medigemma/evaluate_external_adapter.py \
@@ -515,9 +544,14 @@ python3 medigemma/evaluate_external_adapter.py \
   --adapter_subfolder gen7454 \
   --adapter_base_model google/gemma-4-31B-it \
   --candidate_name darius_gen7454_native_prompt \
+  --inference_backend vllm \
   --prompt_style darius \
   --use_source_leaves \
+  --skip_baseline \
   --load_in_4bit \
+  --tensor_parallel_size 1 \
+  --max_model_len 2048 \
+  --lora_rank 64 \
   --max_eval_samples 100000 \
   --output_dir ./reports
 ```

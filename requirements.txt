@@ -1,5 +1,8 @@
 # Core ML / fine-tuning
-torch>=2.2.0
+# Keep a ceiling so `pip install -U -r requirements.txt` does not replace the
+# CUDA-matched Torch wheel provided by GPU images. The Vast image used here has
+# torchvision pinned to torch 2.12.0.
+torch>=2.12.0,<2.12.1
 transformers>=5.9.0
 peft>=0.19.1
 trl>=0.12.0

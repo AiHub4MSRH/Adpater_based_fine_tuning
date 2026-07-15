@@ -23,7 +23,7 @@ from typing import Any, Optional
 
 import torch
 from datasets import concatenate_datasets
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from peft import PeftModel
 from transformers import (
     AutoModelForCausalLM,
@@ -140,6 +140,16 @@ def parse_args() -> argparse.Namespace:
         help="Transformers AutoModel class for the external adapter base.",
     )
     parser.add_argument(
+        "--inference_backend",
+        choices=("transformers_peft", "vllm"),
+        default="transformers_peft",
+        help=(
+            "`transformers_peft` uses vanilla Transformers + PEFT. `vllm` "
+            "uses Darius' serving pattern with vLLM LoRARequest, which is "
+            "needed for Gemma-4 adapters saved with clippable linear wrappers."
+        ),
+    )
+    parser.add_argument(
         "--candidate_name",
         default="darius_gen7454",
         help="Human-readable candidate label stored in the JSON report.",
@@ -167,7 +177,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--load_in_4bit",
         action="store_true",
-        help="Load the external adapter base and optional baseline in 4-bit mode.",
+        help=(
+            "Load the external adapter base and optional baseline in 4-bit mode. "
+            "For the vLLM backend this maps to bitsandbytes quantization."
+        ),
+    )
+    parser.add_argument(
+        "--tensor_parallel_size",
+        type=int,
+        default=1,
+        help="vLLM tensor_parallel_size when --inference_backend vllm.",
+    )
+    parser.add_argument(
+        "--max_model_len",
+        type=int,
+        default=2048,
+        help="vLLM max_model_len when --inference_backend vllm.",
+    )
+    parser.add_argument(
+        "--gpu_memory_utilization",
+        type=float,
+        default=0.9,
+        help="vLLM GPU memory utilization when --inference_backend vllm.",
+    )
+    parser.add_argument(
+        "--vllm_quantization",
+        default=None,
+        help="Optional vLLM quantization, e.g. bitsandbytes.",
+    )
+    parser.add_argument(
+        "--lora_rank",
+        type=int,
+        default=64,
+        help="vLLM max_lora_rank. gen7454 and mg_2226 use rank 64.",
     )
     parser.add_argument(
         "--hf_token",
@@ -340,6 +382,102 @@ def load_external_adapter_model(
     return model, processor
 
 
+def resolve_local_adapter_path(
+    *,
+    adapter_repo: str,
+    adapter_subfolder: str,
+    cache_dir: Optional[str],
+    hf_token: Optional[str],
+) -> str:
+    """
+    Download an HF adapter repo snapshot and return the local subfolder path.
+
+    vLLM's LoRARequest expects a filesystem path, while PEFT can read directly
+    from the Hub. Keeping this small helper separate lets the vLLM backend
+    follow Darius' own `gen_samples.py` serving pattern.
+    """
+
+    repo_root = snapshot_download(
+        repo_id=adapter_repo,
+        allow_patterns=[f"{adapter_subfolder}/*"],
+        cache_dir=cache_dir,
+        token=hf_token,
+    )
+    adapter_path = Path(repo_root) / adapter_subfolder
+    if not adapter_path.exists():
+        raise FileNotFoundError(
+            f"Downloaded {adapter_repo}, but {adapter_subfolder} was not found."
+        )
+    return str(adapter_path)
+
+
+def load_vllm_adapter_model(
+    *,
+    base_model_ref: str,
+    adapter_repo: str,
+    adapter_subfolder: str,
+    load_in_4bit: bool,
+    cache_dir: Optional[str],
+    hf_token: Optional[str],
+    tensor_parallel_size: int,
+    max_model_len: int,
+    gpu_memory_utilization: float,
+    vllm_quantization: Optional[str],
+    lora_rank: int,
+):
+    try:
+        from vllm import LLM
+        from vllm.lora.request import LoRARequest
+    except ImportError as exc:
+        raise RuntimeError(
+            "The vLLM backend requires `vllm`. Install or use an environment "
+            "compatible with Darius' serving code before running this backend."
+        ) from exc
+
+    adapter_path = resolve_local_adapter_path(
+        adapter_repo=adapter_repo,
+        adapter_subfolder=adapter_subfolder,
+        cache_dir=cache_dir,
+        hf_token=hf_token,
+    )
+
+    quantization = vllm_quantization
+    if load_in_4bit and not quantization:
+        quantization = "bitsandbytes"
+
+    kwargs: dict[str, Any] = {
+        "model": base_model_ref,
+        "tensor_parallel_size": tensor_parallel_size,
+        "dtype": "bfloat16",
+        "max_model_len": max_model_len,
+        "gpu_memory_utilization": gpu_memory_utilization,
+        "enforce_eager": True,
+        "trust_remote_code": True,
+        "enable_lora": True,
+        "max_lora_rank": lora_rank,
+    }
+    if quantization:
+        kwargs["quantization"] = quantization
+        kwargs["load_format"] = quantization
+
+    logger.info(
+        "Loading vLLM base %s with LoRA adapter %s (max_lora_rank=%s)",
+        base_model_ref,
+        adapter_path,
+        lora_rank,
+    )
+    llm = LLM(**kwargs)
+    lora_request = LoRARequest("adapter", 1, adapter_path)
+    processor = load_external_processor(
+        base_model_ref,
+        adapter_repo=adapter_repo,
+        adapter_subfolder=adapter_subfolder,
+        cache_dir=cache_dir,
+        hf_token=hf_token,
+    )
+    return {"llm": llm, "lora_request": lora_request}, processor
+
+
 def source_to_darius_subset(source_dataset: str) -> str:
     return SOURCE_TO_DARIUS_SUBSET.get(source_dataset, source_dataset)
 
@@ -377,6 +515,22 @@ def build_candidate_messages(
         quality=(prompt_style == "darius_quality"),
     )
     return [{"role": "user", "content": f"{system_text}\n\nQuestion: {prompt}"}]
+
+
+def render_prompt_text(processor_or_tokenizer, messages: list[dict[str, str]]) -> str:
+    owner = tokenizer_like(processor_or_tokenizer)
+    try:
+        return owner.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    except TypeError:
+        return owner.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
 
 
 def encode_messages(processor_or_tokenizer, messages: list[dict[str, str]]):
@@ -435,6 +589,50 @@ def generate_candidate_response(
 
     prompt_length = inputs["input_ids"].shape[1]
     return decode_new_tokens(processor_or_tokenizer, output_ids[0][prompt_length:])
+
+
+def generate_candidate_responses_vllm(
+    vllm_state: dict[str, Any],
+    processor_or_tokenizer,
+    *,
+    examples: list[dict[str, Any]],
+    language_name: str,
+    lang_code: str,
+    prompt_style: str,
+    max_new_tokens: int,
+) -> list[str]:
+    from vllm import SamplingParams
+
+    prompts = []
+    for example in examples:
+        source_dataset = example.get("_source_dataset", lang_code)
+        messages = build_candidate_messages(
+            prompt=example["input"],
+            language_name=language_name,
+            source_dataset=source_dataset,
+            prompt_style=prompt_style,
+        )
+        prompts.append(render_prompt_text(processor_or_tokenizer, messages))
+
+    sampling_params = SamplingParams(
+        n=1,
+        temperature=0.0,
+        top_p=1.0,
+        max_tokens=max_new_tokens,
+        seed=1234,
+    )
+    outputs = vllm_state["llm"].generate(
+        prompts,
+        sampling_params,
+        lora_request=vllm_state["lora_request"],
+    )
+    predictions = []
+    for output in outputs:
+        if output.outputs:
+            predictions.append(output.outputs[0].text.strip())
+        else:
+            predictions.append("")
+    return predictions
 
 
 def source_ids_for_target(lang_code: str, use_source_leaves: bool) -> tuple[str, ...]:
@@ -621,36 +819,66 @@ def main() -> None:
 
     candidate_model = None
     try:
-        candidate_model, candidate_processor = load_external_adapter_model(
-            base_model_ref=args.adapter_base_model,
-            adapter_repo=args.adapter_repo,
-            adapter_subfolder=args.adapter_subfolder,
-            adapter_model_class=args.adapter_model_class,
-            load_in_4bit=args.load_in_4bit,
-            cache_dir=args.cache_dir,
-            hf_token=hf_token,
-        )
+        if args.inference_backend == "vllm":
+            candidate_model, candidate_processor = load_vllm_adapter_model(
+                base_model_ref=args.adapter_base_model,
+                adapter_repo=args.adapter_repo,
+                adapter_subfolder=args.adapter_subfolder,
+                load_in_4bit=args.load_in_4bit,
+                cache_dir=args.cache_dir,
+                hf_token=hf_token,
+                tensor_parallel_size=args.tensor_parallel_size,
+                max_model_len=args.max_model_len,
+                gpu_memory_utilization=args.gpu_memory_utilization,
+                vllm_quantization=args.vllm_quantization,
+                lora_rank=args.lora_rank,
+            )
+        else:
+            candidate_model, candidate_processor = load_external_adapter_model(
+                base_model_ref=args.adapter_base_model,
+                adapter_repo=args.adapter_repo,
+                adapter_subfolder=args.adapter_subfolder,
+                adapter_model_class=args.adapter_model_class,
+                load_in_4bit=args.load_in_4bit,
+                cache_dir=args.cache_dir,
+                hf_token=hf_token,
+            )
 
         for lang_code, examples in examples_by_language.items():
             lang_cfg = SUPPORTED_LANGUAGES[lang_code]
             logger.info("Generating external adapter predictions for %s", lang_code)
-            candidate_predictions = []
-            for example in examples:
-                source_dataset = example.get("_source_dataset", lang_code)
+            if args.inference_backend == "vllm":
                 try:
-                    prediction = generate_candidate_response(
+                    candidate_predictions = generate_candidate_responses_vllm(
                         candidate_model,
                         candidate_processor,
-                        prompt=example["input"],
+                        examples=examples,
                         language_name=lang_cfg.language_name,
-                        source_dataset=source_dataset,
+                        lang_code=lang_code,
                         prompt_style=args.prompt_style,
                         max_new_tokens=args.max_new_tokens,
                     )
                 except Exception as exc:
-                    logger.error("Candidate generation error for %s: %s", lang_code, exc)
-                    prediction = ""
-                candidate_predictions.append(prediction)
+                    logger.error("vLLM generation error for %s: %s", lang_code, exc)
+                    candidate_predictions = [""] * len(examples)
+            else:
+                candidate_predictions = []
+                for example in examples:
+                    source_dataset = example.get("_source_dataset", lang_code)
+                    try:
+                        prediction = generate_candidate_response(
+                            candidate_model,
+                            candidate_processor,
+                            prompt=example["input"],
+                            language_name=lang_cfg.language_name,
+                            source_dataset=source_dataset,
+                            prompt_style=args.prompt_style,
+                            max_new_tokens=args.max_new_tokens,
+                        )
+                    except Exception as exc:
+                        logger.error("Candidate generation error for %s: %s", lang_code, exc)
+                        prediction = ""
+                    candidate_predictions.append(prediction)
 
             candidate_metrics = {
                 "language": lang_code,
@@ -829,6 +1057,7 @@ def main() -> None:
         "adapter_subfolder": args.adapter_subfolder,
         "adapter_base_model": args.adapter_base_model,
         "adapter_model_class": args.adapter_model_class,
+        "inference_backend": args.inference_backend,
         "prompt_style": args.prompt_style,
         "baseline_model": None if args.skip_baseline else args.baseline_model,
         "split": args.split,
