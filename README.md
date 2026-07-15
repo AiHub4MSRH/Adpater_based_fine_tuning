@@ -172,6 +172,7 @@ Local data may also be stored as source leaves such as `data/eng_uga/` and
 | Train or eval | `python3 medigemma/train.py` | `python3 'meditron train scripts/train.py'` |
 | Compare baseline vs adapter | `python3 medigemma/compare_models.py` | `python3 'meditron train scripts/compare_models.py'` |
 | Evaluate external HF adapter | `python3 medigemma/evaluate_external_adapter.py` | N/A |
+| Add retrieval/selection columns | `python3 medigemma/retrieve_select_from_comparison.py` | N/A |
 | LLM judge comparison CSV | `python3 judge_comparison_with_openai.py` | `python3 judge_comparison_with_openai.py` |
 | Push adapters to Hub | `python3 medigemma/push_adapters_to_hub.py` | `python3 'meditron train scripts/push_adapters_to_hub.py'` |
 | Run Hub inference | `python3 medigemma/run_inference_from_hub.py` | `python3 'meditron train scripts/run_inference_from_hub.py'` |
@@ -564,6 +565,34 @@ can fetch `eng_eth`, `eng_gha`, `eng_ken`, `eng_uga`, `swa_ken`, and `swa_uga`.
 Keep `--require_source_leaves` on for Brainiac checks so the run fails loudly
 instead of silently falling back to combined `eng` and `swa` data.
 
+Brainiac's published solution does not rely on generation alone. For several
+high-reuse subsets it retrieves answers from a same-source Train+Val bank, then
+selects whether to keep generation or replace it with the retrieved bank answer.
+The selector keeps generation for `aka_gha`, `amh_eth`, `eng_gha`, and
+`swa_uga`, and applies retrieval-aware selection for `eng_ken`, `eng_uga`,
+`eng_eth`, `swa_ken`, and `lug_uga`.
+After the source-leaf generation CSV is written, run this Darius-style retrieval
+and selection pass:
+
+```bash
+python3 medigemma/retrieve_select_from_comparison.py \
+  --comparison_csv ./reports/darius_gen7454_native_prompt_test_comparison.csv \
+  --output_csv ./reports/darius_gen7454_native_prompt_retrieval_selected.csv \
+  --report_json ./reports/darius_gen7454_native_prompt_retrieval_selected_report.json \
+  --data_root ./data \
+  --dataset_repo AiHub4MSRH-Hash/RAW_HASH_DATASET \
+  --bank_splits train dev \
+  --top_k 20 \
+  --require_source_dataset \
+  --include_oracle
+```
+
+Use `selected_prediction` as the final Brainiac-style prediction column. The
+CSV also keeps `adapter_prediction` for generation-only output,
+`retrieval_prediction` for the top answer-bank match, and
+`retrieval_oracle_prediction` only as a reference-leaking diagnostic. Do not use
+the oracle column as a real model result.
+
 Run the OpenAI judge on the external-adapter comparison:
 
 ```bash
@@ -583,6 +612,19 @@ python3 judge_comparison_with_openai.py \
   --prediction_columns adapter_prediction \
   --output_csv ./reports/darius_gen7454_test_llm_judged.csv \
   --report_json ./reports/darius_gen7454_test_llm_judge_report.json \
+  --batch_size 8 \
+  --concurrency 4
+```
+
+To judge the Brainiac-style retrieval/selection output, score all three useful
+columns side by side:
+
+```bash
+python3 judge_comparison_with_openai.py \
+  --comparison_csv ./reports/darius_gen7454_native_prompt_retrieval_selected.csv \
+  --prediction_columns adapter_prediction retrieval_prediction selected_prediction \
+  --output_csv ./reports/darius_gen7454_native_prompt_retrieval_selected_llm_judged.csv \
+  --report_json ./reports/darius_gen7454_native_prompt_retrieval_selected_llm_judge_report.json \
   --batch_size 8 \
   --concurrency 4
 ```
